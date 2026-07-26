@@ -1,0 +1,56 @@
+{
+  "contract_version": 1,
+  "job": {
+    "job_id": "smoke-3dgs-render-iqa-job-1",
+    "batch_id": "smoke-3dgs-render-iqa-batch-1",
+    "job_type": "evaluation",
+    "primary_sample": "sample-1",
+    "primary_sample_metadata": {
+      "pose_convention": "camera_to_world",
+      "pose_coordinate_system": "NED",
+      "pose_units": "meters"
+    },
+    "source_job_id": "smoke-generation-job-1",
+    "attempt": 1,
+    "timeout_seconds": 1800,
+    "parameters": {
+      "metrics": [
+        "psnr",
+        "ssim",
+        "lpips",
+        "ws_psnr",
+        "dists"
+      ],
+      "output_images": true,
+      "max_distance": 50.0
+    }
+  },
+  "inputs": {
+    "data": {
+      "sample-1": {
+        "image": "/data/datasets/smoke/reference-panorama.png",
+        "camera_pose": {
+          "position": [10.0, 5.0, 0.0],
+          "rotation_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+        }
+      }
+    },
+    "candidate": {
+      "sample-1": {
+        "3dgs": "/data/output/pano2room@0.1.0/smoke/sample-1/3DGS.ply"
+      }
+    },
+    "references": {
+      "sample-2": {
+        "image": "/data/datasets/smoke/reference-panorama-2.png",
+        "camera_pose": {
+          "position": [11.0, 5.0, 0.0],
+          "rotation_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+        }
+      }
+    }
+  },
+  "runtime": {
+    "output_dir": "/data/output/3dgs_render_iqa@0.1.0/pano2room@0.1.0/smoke/sample-1"
+  }
+}

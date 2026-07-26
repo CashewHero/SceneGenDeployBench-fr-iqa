@@ -1,0 +1,86 @@
+catalog_version: 1
+
+runners:
+  - runner: fr_iqa
+    version: 0.1.0
+    latest: true
+    display_name: Full-Reference Image Quality
+    kind: evaluator
+    contract_version: 1
+    inputs:
+      data:
+        required_sample:
+          required_datatype:
+            - image
+      candidate:
+        required_sample:
+          required_datatype:
+            - image
+    job_parameters:
+      metrics:
+        - psnr
+        - ssim
+        - lpips
+        - ws_psnr
+        - dists
+    scheduling:
+      max_batch_size: 50
+      max_attempts: 1
+      job_timeout_minutes: 5
+      startup_timeout_minutes: 5
+    launcher:
+      driver: docker
+      compat_version: 1
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.0
+      endpoint:
+        port: 58090
+      env:
+        RUNNER_ADAPTER: runner_wrapper.fr_iqa_adapter:run_job
+        TORCH_HOME: /data/model_cache/torch
+
+  - runner: 3dgs_render_iqa
+    version: 0.1.0
+    latest: true
+    display_name: 3DGS Render Image Quality
+    kind: evaluator
+    contract_version: 1
+    inputs:
+      data:
+        required_sample:
+          required_datatype:
+            - image
+          optional_datatype:
+            - camera_pose
+      candidate:
+        required_sample:
+          required_datatype:
+            - 3dgs
+      references:
+        optional_sample:
+          required_datatype:
+            - image
+            - camera_pose
+    job_parameters:
+      metrics:
+        - psnr
+        - ssim
+        - lpips
+        - ws_psnr
+        - dists
+      output_images: true
+      max_distance: 50.0
+    scheduling:
+      max_batch_size: 50
+      max_attempts: 1
+      job_timeout_minutes: 30
+      startup_timeout_minutes: 5
+    launcher:
+      driver: docker
+      compat_version: 1
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.0
+      gpus: all
+      endpoint:
+        port: 58090
+      env:
+        RUNNER_ADAPTER: runner_wrapper.render_3dgs_adapter:run_job
+        TORCH_HOME: /data/model_cache/torch

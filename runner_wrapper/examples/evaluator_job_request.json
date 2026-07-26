@@ -1,0 +1,36 @@
+{
+  "contract_version": 1,
+  "job": {
+    "job_id": "smoke-fr-iqa-job-1",
+    "batch_id": "smoke-fr-iqa-batch-1",
+    "job_type": "evaluation",
+    "primary_sample": "sample-1",
+    "source_job_id": "smoke-generation-job-1",
+    "attempt": 1,
+    "timeout_seconds": 300,
+    "parameters": {
+      "metrics": [
+        "psnr",
+        "ssim",
+        "lpips",
+        "ws_psnr",
+        "dists"
+      ]
+    }
+  },
+  "inputs": {
+    "data": {
+      "sample-1": {
+        "image": "/data/datasets/smoke/reference.png"
+      }
+    },
+    "candidate": {
+      "sample-1": {
+        "image": "/data/output/smoke-generator/sample-1/candidate.png"
+      }
+    }
+  },
+  "runtime": {
+    "output_dir": "/data/output/fr_iqa@0.1.0/smoke-generator@0.1.0/smoke-dataset/sample-1"
+  }
+}

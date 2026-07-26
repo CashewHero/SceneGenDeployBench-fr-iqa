@@ -1,0 +1,6 @@
+gsplat==1.5.3
+numpy>=2.0,<3
+Pillow>=11,<13
+plyfile==1.1.4
+pyequilib==0.6.0
+torchmetrics==1.9.0
