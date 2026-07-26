@@ -71,6 +71,8 @@ Evaluator metric entries use stable `namespace`, `name`, `type`, `value`, option
 
 Use `tee_job_output` so model stdout and stderr reach both Docker logs and `runner-<variant>.log`. Preserve exceptions and useful progress while avoiding high-frequency progress-bar noise.
 
+Use `publish_file` from `runner_wrapper.files` when copying generated files into the job output directory. It preserves metadata where supported and falls back safely on restricted filesystems.
+
 ## Catalog Alignment
 
 Create one YAML under `runner_wrapper/config/runners/` from the matching example. This is the runner's distributable catalog; a deployment copies it into its active runner-config directory. Do not make the model repository depend on an orchestrator checkout. Ensure these fields match the adapter:

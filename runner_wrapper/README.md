@@ -31,6 +31,7 @@ The main files are:
 ```text
 runner_wrapper/
   adapter.py       model-specific job implementation
+  files.py         compatible artifact publication
   server.py        shared HTTP runner server
   Dockerfile       runner image build
   localtest.sh     local build and smoke helper
@@ -67,7 +68,7 @@ Manual run:
 docker run --rm -p 58090:58090 \
   -e RUNNER_NAME=fr_iqa \
   -e RUNNER_TYPE=evaluator \
-  -e RUNNER_VERSION=0.1.0 \
+  -e RUNNER_VERSION=0.1.2 \
   -v "$PWD/data:/data" \
   my-model-runner
 ```

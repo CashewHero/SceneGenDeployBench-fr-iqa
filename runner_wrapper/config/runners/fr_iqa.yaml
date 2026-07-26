@@ -2,7 +2,7 @@ catalog_version: 1
 
 runners:
   - runner: fr_iqa
-    version: 0.1.1
+    version: 0.1.2
     latest: true
     display_name: Full-Reference Image Quality
     kind: evaluator
@@ -31,7 +31,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.1
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.2
       endpoint:
         port: 58090
       env:
@@ -39,7 +39,7 @@ runners:
         TORCH_HOME: /data/model_cache/torch
 
   - runner: 3dgs_render_iqa
-    version: 0.1.1
+    version: 0.1.2
     latest: true
     display_name: 3DGS Render Image Quality
     kind: evaluator
@@ -77,7 +77,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.1
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.2
       gpus: all
       endpoint:
         port: 58090

@@ -37,7 +37,7 @@
     },
     "candidate": {
       "sample-1": {
-        "3dgs": "/data/output/pano2room@0.1.1/smoke/sample-1/3DGS.ply"
+        "3dgs": "/data/output/pano2room@0.1.2/smoke/sample-1/3DGS.ply"
       }
     },
     "references": {
@@ -51,6 +51,6 @@
     }
   },
   "runtime": {
-    "output_dir": "/data/output/3dgs_render_iqa@0.1.1/pano2room@0.1.1/smoke/sample-1"
+    "output_dir": "/data/output/3dgs_render_iqa@0.1.2/pano2room@0.1.2/smoke/sample-1"
   }
 }
