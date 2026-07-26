@@ -31,6 +31,7 @@ The main files are:
 ```text
 runner_wrapper/
   adapter.py       model-specific job implementation
+  files.py         compatible artifact publication
   server.py        shared HTTP runner server
   Dockerfile       runner image build
   localtest.sh     local build and smoke helper

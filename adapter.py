@@ -12,13 +12,13 @@ import logging
 import os
 import random
 import re
-import shutil
 import sys
 import time
 import traceback
 from pathlib import Path
 from typing import Any
 
+from runner_wrapper.files import publish_file
 from runner_wrapper.job_logging import tee_job_output
 from runner_wrapper.measurements import ResourceMonitor
 
@@ -108,7 +108,7 @@ def _copy_inputs(
                 f"{variant}{src_path.suffix}"
             )
             dst_path = output_root / dst_name
-            shutil.copy2(src_path, dst_path)
+            publish_file(src_path, dst_path)
             sample_outputs[data_type] = str(dst_path.relative_to(output_root))
             copied += 1
         if sample_outputs:
