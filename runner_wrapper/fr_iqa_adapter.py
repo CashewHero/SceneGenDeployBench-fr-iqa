@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import sys
 import time
 import traceback
@@ -22,6 +23,7 @@ from torchmetrics.functional.image import (
 from torchmetrics.functional.image.dists import DISTSNetwork
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
+from runner_wrapper.files import publish_directory, publish_file
 from runner_wrapper.job_logging import tee_job_output
 from runner_wrapper.measurements import ResourceMonitor
 
@@ -97,7 +99,7 @@ def _required_path(mapping: Any, field_name: str) -> Path:
 def _selected_metrics(parameters: Any) -> list[str]:
     if not isinstance(parameters, dict):
         raise ValueError("job.parameters must be an object")
-    raw_metrics = parameters.get("metrics", list(SUPPORTED_METRICS))
+    raw_metrics = parameters.get("metrics", "all")
     if isinstance(raw_metrics, str):
         values = raw_metrics.split(",")
     elif isinstance(raw_metrics, list):
@@ -108,6 +110,11 @@ def _selected_metrics(parameters: Any) -> list[str]:
     selected: list[str] = []
     for raw_value in values:
         metric = str(raw_value).strip().lower()
+        if metric == "all":
+            for supported_metric in SUPPORTED_METRICS:
+                if supported_metric not in selected:
+                    selected.append(supported_metric)
+            continue
         metric = METRIC_ALIASES.get(metric, metric)
         if not metric or metric in selected:
             continue
@@ -229,6 +236,39 @@ class ImageQualityEvaluator:
         return metrics
 
 
+def create_image_quality_evaluator(
+    selected_metrics: list[str],
+    device: torch.device,
+    workspace_root: Path,
+) -> ImageQualityEvaluator:
+    local_cache = workspace_root / "model-cache" / "torch"
+    local_cache.mkdir(parents=True, exist_ok=True)
+    learned_metrics = {"lpips", "dists"}.intersection(selected_metrics)
+    if not learned_metrics:
+        os.environ["TORCH_HOME"] = str(local_cache)
+        return ImageQualityEvaluator(selected_metrics, device)
+
+    shared_cache = Path(os.getenv("PATH_MODEL_CACHE", "/data/model_cache")) / "torch"
+    ready_marker = shared_cache / ".fr-iqa-torchmetrics-1.9.0.ready"
+    if ready_marker.is_file():
+        os.environ["TORCH_HOME"] = str(shared_cache)
+        return ImageQualityEvaluator(selected_metrics, device)
+
+    os.environ["TORCH_HOME"] = str(local_cache)
+    evaluator = ImageQualityEvaluator(["lpips", "dists"], device)
+    publish_directory(local_cache, shared_cache, dirs_exist_ok=True)
+    local_marker = workspace_root / ready_marker.name
+    local_marker.write_text("ready\n", encoding="utf-8")
+    publish_file(local_marker, ready_marker)
+
+    evaluator.selected_metrics = selected_metrics
+    if "lpips" not in selected_metrics:
+        evaluator.lpips = None
+    if "dists" not in selected_metrics:
+        evaluator.dists = None
+    return evaluator
+
+
 def _evaluate(
     reference: torch.Tensor,
     candidate: torch.Tensor,
@@ -250,30 +290,29 @@ def _write_metrics_file(path: Path, payload: dict[str, Any]) -> None:
 def run_job(job_request: dict[str, Any]) -> dict[str, Any]:
     started_at = time.time()
     runtime = job_request["runtime"]
-    output_root = Path(runtime["output_dir"])
-    output_root.mkdir(parents=True, exist_ok=True)
+    workspace_root = Path(runtime["workspace_dir"])
+    workspace_root.mkdir(parents=True, exist_ok=True)
     variant = _variant_key(job_request, "iqa")
-    log_path = output_root / f"runner-{variant}.log"
+    log_path = workspace_root / f"runner-{variant}.log"
     with tee_job_output(log_path):
-        return _run_job_logged(job_request, started_at, output_root, variant, log_path.name)
+        return _run_job_logged(job_request, started_at, workspace_root, variant, log_path.name)
 
 
 def _run_job_logged(
     job_request: dict[str, Any],
     started_at: float,
-    output_root: Path,
+    workspace_root: Path,
     variant: str,
     log_name: str,
 ) -> dict[str, Any]:
     monitor: ResourceMonitor | None = None
     metrics_name = f"metrics-{variant}.json"
-    metrics_path = output_root / metrics_name
+    metrics_path = workspace_root / metrics_name
     inputs: dict[str, dict[str, dict[str, Any]]] = {}
     parameters: dict[str, Any] = {}
 
     try:
         job = job_request["job"]
-        runtime = job_request["runtime"]
         inputs = _normalize_inputs(job_request.get("inputs"))
         data_samples = inputs.get("data", {})
         candidate_samples = inputs.get("candidate", {})
@@ -305,21 +344,13 @@ def _run_job_logged(
             for sample_id, sample_data in samples.items()
             for data_type, value in sample_data.items()
         }
-        monitor = ResourceMonitor(sample_data=monitor_data, output_dir=output_root)
+        monitor = ResourceMonitor(sample_data=monitor_data, output_dir=workspace_root)
         monitor.start()
-        logger.info(
-            event_message(
-                "adapter_run_started",
-                job_id=job["job_id"],
-                batch_id=job.get("batch_id"),
-                output_dir=runtime["output_dir"],
-                input_roles=sorted(inputs),
-            )
-        )
         logger.info(
             event_message(
                 "evaluation_started",
                 job_id=job["job_id"],
+                batch_id=job.get("batch_id"),
                 reference_image=str(reference_path),
                 candidate_image=str(candidate_path),
                 metrics=selected_metrics,
@@ -328,6 +359,14 @@ def _run_job_logged(
 
         reference, reference_info = _load_rgb_image(reference_path)
         candidate, candidate_info = _load_rgb_image(candidate_path)
+        logger.info(
+            event_message(
+                "evaluation_inputs_loaded",
+                job_id=job["job_id"],
+                resolution=f"{reference_info['width']}x{reference_info['height']}",
+                elapsed_seconds=round(time.time() - started_at, 3),
+            )
+        )
         if reference.shape != candidate.shape:
             raise ValueError(
                 "aligned image dimensions must match exactly: "
@@ -335,7 +374,26 @@ def _run_job_logged(
                 f"candidate={candidate_info['width']}x{candidate_info['height']}"
             )
 
-        quality_metrics = _evaluate(reference, candidate, selected_metrics)
+        logger.info(
+            event_message(
+                "metric_evaluation_started",
+                job_id=job["job_id"],
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                metrics=selected_metrics,
+            )
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        evaluator = create_image_quality_evaluator(
+            selected_metrics,
+            device,
+            workspace_root,
+        )
+        quality_metrics = _evaluate(
+            reference,
+            candidate,
+            selected_metrics,
+            evaluator,
+        )
         resource_metrics = monitor.stop()
         monitor = None
         metrics = quality_metrics + resource_metrics
@@ -353,6 +411,7 @@ def _run_job_logged(
                 "evaluation_completed",
                 job_id=job["job_id"],
                 metrics={item["name"]: item["value"] for item in quality_metrics},
+                elapsed_seconds=round(completed_at - started_at, 3),
             )
         )
         return {
@@ -396,7 +455,11 @@ def _run_job_logged(
                 {
                     "artifact_type": "job_log",
                     "path": log_name,
-                }
+                },
+                {
+                    "artifact_type": "metric_summary",
+                    "path": metrics_name,
+                },
             ],
             "failure": {
                 "code": "FR_IQA_FAILED",

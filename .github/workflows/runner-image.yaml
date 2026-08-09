@@ -93,4 +93,4 @@ jobs:
             INSTALL_REQUIREMENTS=1
             INSTALL_EDITABLE=0
           cache-from: type=gha,scope=${{ steps.image.outputs.image }}
-          cache-to: type=gha,mode=max,scope=${{ steps.image.outputs.image }}
+          cache-to: type=gha,mode=max,ignore-error=true,scope=${{ steps.image.outputs.image }}

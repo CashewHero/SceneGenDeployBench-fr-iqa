@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import time
 import unittest
 from http.client import HTTPConnection
+from pathlib import Path
 
 from runner_wrapper.server import (
     Runner,
@@ -32,6 +34,21 @@ def slow_job(_: dict) -> dict:
 def large_result_job(_: dict) -> dict:
     result = completed_job({})
     result["payload"] = "x" * (2 * 1024 * 1024)
+    return result
+
+
+def output_job(job_request: dict) -> dict:
+    runtime = job_request["runtime"]
+    workspace_dir = Path(runtime["workspace_dir"])
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "result.txt").write_text("published\n", encoding="utf-8")
+    (workspace_dir / "report.txt").write_text("artifact\n", encoding="utf-8")
+    (workspace_dir / "scratch.tmp").write_text("temporary\n", encoding="utf-8")
+    result = completed_job({})
+    result["output_files"] = {"sample-1": {"text": "result.txt"}}
+    result["artifacts"] = [{"artifact_type": "report", "path": "report.txt"}]
+    result["adapter_workspace_dir"] = str(workspace_dir)
+    result["adapter_received_output_dir"] = "output_dir" in runtime
     return result
 
 
@@ -93,6 +110,27 @@ class RunnerContractTests(unittest.TestCase):
         request = {"job": {"job_id": "job-1", "batch_id": "batch-1", "timeout_seconds": 2}}
         result = runner._run_job_in_child_process(request, timeout_seconds=2, kill_after_seconds=2)
         self.assertEqual(len(result["payload"]), 2 * 1024 * 1024)
+
+    def test_child_process_stages_and_publishes_runtime_output(self) -> None:
+        runner = Runner(settings=settings(), run_job_handler=output_job, state="idle")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "shared-output"
+            request = {
+                "job": {"job_id": "job-1", "batch_id": "batch-1", "timeout_seconds": 2},
+                "runtime": {"output_dir": str(output_dir)},
+            }
+            result = runner._run_job_in_child_process(
+                request,
+                timeout_seconds=2,
+                kill_after_seconds=2,
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertNotEqual(Path(result["adapter_workspace_dir"]), output_dir)
+            self.assertFalse(result["adapter_received_output_dir"])
+            self.assertEqual((output_dir / "result.txt").read_text(), "published\n")
+            self.assertEqual((output_dir / "report.txt").read_text(), "artifact\n")
+            self.assertFalse((output_dir / "scratch.tmp").exists())
 
     def test_shutdown_terminates_active_job(self) -> None:
         runner = Runner(settings=settings(), run_job_handler=slow_job, state="idle")

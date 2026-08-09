@@ -2,7 +2,7 @@ catalog_version: 1
 
 runners:
   - runner: fr_iqa
-    version: 0.1.2
+    version: 0.1.4
     latest: true
     display_name: Full-Reference Image Quality
     kind: evaluator
@@ -17,12 +17,7 @@ runners:
           required_datatype:
             - image
     job_parameters:
-      metrics:
-        - psnr
-        - ssim
-        - lpips
-        - ws_psnr
-        - dists
+      metrics: all
     scheduling:
       max_batch_size: 50
       max_attempts: 1
@@ -31,15 +26,14 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.2
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.4
       endpoint:
         port: 58090
       env:
         RUNNER_ADAPTER: runner_wrapper.fr_iqa_adapter:run_job
-        TORCH_HOME: /data/model_cache/torch
 
   - runner: 3dgs_render_iqa
-    version: 0.1.2
+    version: 0.1.4
     latest: true
     display_name: 3DGS Render Image Quality
     kind: evaluator
@@ -61,14 +55,10 @@ runners:
             - image
             - camera_pose
     job_parameters:
-      metrics:
-        - psnr
-        - ssim
-        - lpips
-        - ws_psnr
-        - dists
+      metrics: all
       output_images: true
       max_distance: 50.0
+      max_references: 500
     scheduling:
       max_batch_size: 50
       max_attempts: 1
@@ -77,10 +67,67 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.2
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.4
       gpus: all
       endpoint:
         port: 58090
       env:
         RUNNER_ADAPTER: runner_wrapper.render_3dgs_adapter:run_job
-        TORCH_HOME: /data/model_cache/torch
+
+  - runner: 3dgs_scale_calibration
+    version: 0.1.4
+    latest: true
+    display_name: 3DGS Scale Calibration
+    kind: evaluator
+    contract_version: 1
+    inputs:
+      data:
+        required_sample:
+          optional_datatype:
+            - camera_pose
+            - depth
+      candidate:
+        required_sample:
+          required_datatype:
+            - 3dgs
+      references:
+        optional_sample:
+          required_datatype:
+            - camera_pose
+          optional_datatype:
+            - image
+            - depth
+    job_parameters:
+      comparison_mode: auto
+      initial_scene_scale_overwrite: null
+      hybrid_depth_weight: 0.7
+      scale_range_factor: 1.5
+      target_accuracy: 0.001
+      search_points_per_round: 11
+      max_search_rounds: 10
+      max_distance: 10.0
+      max_references: 100
+      min_ground_truth_depth: 0.1
+      max_ground_truth_depth: 5.0
+      depth_min_render_alpha: 0.3
+      depth_min_valid_fraction: 0.3
+      objective_metric: lpips
+      metrics: all
+      save_renders:
+        scales: none
+        types: [rgb, depth, alpha, error_map]
+        copy_ground_truth: false
+    scheduling:
+      max_batch_size: 10
+      max_attempts: 1
+      job_timeout_minutes: 120
+      startup_timeout_minutes: 5
+    launcher:
+      driver: docker
+      compat_version: 1
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.4
+      gpus: all
+      endpoint:
+        port: 58090
+      env:
+        RUNNER_ADAPTER: runner_wrapper.scale_calibration_adapter:run_job

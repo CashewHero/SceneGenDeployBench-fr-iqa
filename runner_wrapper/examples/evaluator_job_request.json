@@ -5,17 +5,15 @@
     "batch_id": "smoke-fr-iqa-batch-1",
     "job_type": "evaluation",
     "primary_sample": "sample-1",
+    "primary_sample_metadata": {},
+    "primary_output_metadata": {
+      "scene_scale": 1.0
+    },
     "source_job_id": "smoke-generation-job-1",
     "attempt": 1,
     "timeout_seconds": 300,
     "parameters": {
-      "metrics": [
-        "psnr",
-        "ssim",
-        "lpips",
-        "ws_psnr",
-        "dists"
-      ]
+      "metrics": "all"
     }
   },
   "inputs": {
@@ -31,6 +29,6 @@
     }
   },
   "runtime": {
-    "output_dir": "/data/output/fr_iqa@0.1.2/smoke-generator@0.1.0/smoke-dataset/sample-1"
+    "output_dir": "/data/output/fr_iqa@0.1.4/smoke-generator@0.1.0/smoke-dataset/sample-1"
   }
 }

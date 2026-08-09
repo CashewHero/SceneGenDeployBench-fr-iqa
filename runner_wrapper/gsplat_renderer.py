@@ -118,13 +118,15 @@ def _canonical_cube_viewmats(device: torch.device) -> list[torch.Tensor]:
 
 
 @torch.inference_mode()
-def render_panorama(
+def render_panorama_outputs(
     splats: dict[str, torch.Tensor | int],
     width: int,
     height: int,
     device: torch.device,
     world_to_camera: torch.Tensor | None = None,
-) -> torch.Tensor:
+    *,
+    include_depth: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     if width != height * 2:
         raise ValueError(
             f"reference image must be a 2:1 equirectangular panorama, got {width}x{height}"
@@ -146,13 +148,20 @@ def render_panorama(
         dtype=torch.float32,
         device=device,
     )[None]
-    # A single packed gsplat camera has no leading image dimension here.
-    background = torch.ones(3, dtype=torch.float32, device=device)
-
-    faces: list[torch.Tensor] = []
+    rgb_faces: list[torch.Tensor] = []
+    depth_faces: list[torch.Tensor] = []
+    alpha_faces: list[torch.Tensor] = []
+    pixel_coordinates = (
+        torch.arange(face_size, dtype=torch.float32, device=device) + 0.5
+    )
+    normalized = (pixel_coordinates - face_size / 2.0) / focal
+    normalized_x, normalized_y = torch.meshgrid(normalized, normalized, indexing="xy")
+    radial_depth_factor = torch.sqrt(
+        1.0 + normalized_x.square() + normalized_y.square()
+    )
     for cube_viewmat in _canonical_cube_viewmats(device):
         viewmat = cube_viewmat @ world_to_camera
-        render, _, _ = rasterization(
+        render, alpha, _ = rasterization(
             means=splats["means"],
             quats=splats["quats"],
             scales=splats["scales"],
@@ -164,15 +173,56 @@ def render_panorama(
             height=face_size,
             sh_degree=int(splats["sh_degree"]),
             packed=True,
-            backgrounds=background,
+            render_mode="RGB+ED" if include_depth else "RGB",
         )
-        faces.append(render[0].permute(2, 0, 1).clamp(0, 1))
+        rgb = render[0, ..., :3] + (1.0 - alpha[0])
+        rgb_faces.append(rgb.permute(2, 0, 1).clamp(0, 1))
+        if include_depth:
+            # gsplat's expected depth is along the cube-face optical axis. Convert
+            # it to radial camera distance before assembling the panorama.
+            depth_faces.append(
+                (render[0, ..., 3] * radial_depth_factor).unsqueeze(0)
+            )
+            alpha_faces.append(alpha[0, ..., 0].unsqueeze(0).clamp(0, 1))
 
     panorama = cube2equi(
-        cubemap=faces,
+        cubemap=rgb_faces,
         cube_format="list",
         height=height,
         width=width,
         mode="bilinear",
     )
-    return panorama.clamp(0, 1)
+    if not include_depth:
+        return panorama.clamp(0, 1), None, None
+    depth = cube2equi(
+        cubemap=depth_faces,
+        cube_format="list",
+        height=height,
+        width=width,
+        mode="bilinear",
+    )[0]
+    alpha = cube2equi(
+        cubemap=alpha_faces,
+        cube_format="list",
+        height=height,
+        width=width,
+        mode="bilinear",
+    )[0]
+    return panorama.clamp(0, 1), depth, alpha.clamp(0, 1)
+
+
+def render_panorama(
+    splats: dict[str, torch.Tensor | int],
+    width: int,
+    height: int,
+    device: torch.device,
+    world_to_camera: torch.Tensor | None = None,
+) -> torch.Tensor:
+    image, _, _ = render_panorama_outputs(
+        splats,
+        width,
+        height,
+        device,
+        world_to_camera,
+    )
+    return image

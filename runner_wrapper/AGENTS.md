@@ -71,7 +71,9 @@ Evaluator metric entries use stable `namespace`, `name`, `type`, `value`, option
 
 Use `tee_job_output` so model stdout and stderr reach both Docker logs and `runner-<variant>.log`. Preserve exceptions and useful progress while avoiding high-frequency progress-bar noise.
 
-Use `publish_file` from `runner_wrapper.files` when copying generated files into the job output directory. It preserves metadata where supported and falls back safely on restricted filesystems.
+## Shared Filesystem Publication
+
+Use `runtime.workspace_dir` for all job-local runtime files. Return files that need to be kept as relative paths in `output_files` or `artifacts`; `server.py` publishes them to `runtime.output_dir`. Never write to `runtime.output_dir` directly. Prepare model-cache entries locally, then publish them with `publish_file` or `publish_directory` from `runner_wrapper.files`.
 
 ## Catalog Alignment
 
@@ -122,6 +124,8 @@ The semantic data type reported by a producer must be the type required by its c
 ## Docker Adaptation
 
 Keep heavyweight or mutable weights in the shared model cache unless licensing or reproducibility requires image-bundled public assets. Make automatic downloads concurrency-safe and deterministic. Document required tokens without committing them.
+
+If the runner will have a large image build, change the github image workflow cache from `mode=max` to `mode=min`.
 
 Use the catalog `launcher.env` for model mode, checkpoint selection, thresholds, backend flags, and paths. Use `env_passthrough` only for values supplied by deployment, such as credentials.
 

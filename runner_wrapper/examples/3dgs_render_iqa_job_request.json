@@ -14,15 +14,10 @@
     "attempt": 1,
     "timeout_seconds": 1800,
     "parameters": {
-      "metrics": [
-        "psnr",
-        "ssim",
-        "lpips",
-        "ws_psnr",
-        "dists"
-      ],
+      "metrics": "all",
       "output_images": true,
-      "max_distance": 50.0
+      "max_distance": 50.0,
+      "max_references": 10
     }
   },
   "inputs": {
@@ -37,7 +32,7 @@
     },
     "candidate": {
       "sample-1": {
-        "3dgs": "/data/output/pano2room@0.1.2/smoke/sample-1/3DGS.ply"
+        "3dgs": "/data/output/pano2room@0.1.3/smoke/sample-1/3DGS.ply"
       }
     },
     "references": {
@@ -51,6 +46,6 @@
     }
   },
   "runtime": {
-    "output_dir": "/data/output/3dgs_render_iqa@0.1.2/pano2room@0.1.2/smoke/sample-1"
+    "output_dir": "/data/output/3dgs_render_iqa@0.1.4/pano2room@0.1.3/smoke/sample-1"
   }
 }

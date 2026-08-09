@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import queue
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -14,7 +15,10 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import import_module
+from pathlib import Path
 from typing import Any, Callable
+
+from runner_wrapper.files import publish_directory, publish_file
 
 logger = logging.getLogger("runner_wrapper.server")
 
@@ -145,6 +149,53 @@ def job_timeout_seconds(job_request: dict[str, Any]) -> float:
     return timeout_seconds
 
 
+def result_publish_paths(result: dict[str, Any]) -> set[str]:
+    paths: set[str] = set()
+    output_files = result.get("output_files")
+    if isinstance(output_files, dict):
+        for sample_files in output_files.values():
+            if not isinstance(sample_files, dict):
+                continue
+            for path in sample_files.values():
+                if isinstance(path, str) and path.strip():
+                    paths.add(path)
+
+    artifacts = result.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            path = artifact.get("path")
+            if isinstance(path, str) and path.strip():
+                paths.add(path)
+    return paths
+
+
+def publish_result_files(
+    result: dict[str, Any],
+    workspace_dir: str | Path,
+    output_dir: str | Path,
+) -> None:
+    workspace_path = Path(workspace_dir).resolve()
+    output_path = Path(output_dir)
+    for relative_path in sorted(result_publish_paths(result)):
+        path = Path(relative_path)
+        if path.is_absolute() or path == Path(".") or ".." in path.parts:
+            raise ValueError(f"published path must be a relative file or directory: {relative_path}")
+        source_path = (workspace_path / path).resolve()
+        try:
+            source_path.relative_to(workspace_path)
+        except ValueError as exc:
+            raise ValueError(f"published path escapes the workspace: {relative_path}") from exc
+        destination_path = output_path / path
+        if source_path.is_file():
+            publish_file(source_path, destination_path)
+        elif source_path.is_dir():
+            publish_directory(source_path, destination_path, dirs_exist_ok=True)
+        else:
+            raise FileNotFoundError(f"published path not found in workspace: {relative_path}")
+
+
 def build_timeout_result(job_id: object, timeout_seconds: float, kill_after_seconds: float) -> dict[str, Any]:
     completed_at = utc_now()
     return {
@@ -189,7 +240,22 @@ def run_job_child(
 ) -> None:
     configure_logging()
     try:
-        result_queue.put({"ok": True, "result": run_job_handler(job_request)})
+        runtime = request_runtime(job_request)
+        output_dir = runtime.get("output_dir")
+        if isinstance(output_dir, str) and output_dir.strip():
+            with tempfile.TemporaryDirectory(prefix="runner-output-") as temp_dir:
+                staging_dir = Path(temp_dir) / "output"
+                staging_dir.mkdir()
+                staged_request = dict(job_request)
+                adapter_runtime = dict(runtime)
+                adapter_runtime.pop("output_dir", None)
+                adapter_runtime["workspace_dir"] = str(staging_dir)
+                staged_request["runtime"] = adapter_runtime
+                result = run_job_handler(staged_request)
+                publish_result_files(result, staging_dir, output_dir)
+        else:
+            result = run_job_handler(job_request)
+        result_queue.put({"ok": True, "result": result})
     except Exception as exc:
         result_queue.put({"ok": False, "result": build_failure_result(exc)})
 
