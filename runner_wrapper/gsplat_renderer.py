@@ -101,7 +101,7 @@ def _rotation_y(degrees: float, device: torch.device) -> torch.Tensor:
 
 
 def _canonical_cube_viewmats(device: torch.device) -> list[torch.Tensor]:
-    # Match the camera construction used to train Pano2Room's Graphdeco splats.
+    # Render cubemap faces in canonical panorama order using Graphdeco camera axes.
     cube_views = [
         # Equilib order: front, right, back, left, up, down.
         _rotation_y(270, device),

@@ -24,17 +24,21 @@ def scene_scale(output_metadata: Any) -> float:
     return result
 
 
-def resolve_scene_scale(metadata_scale: float, override: Any) -> float:
+def resolve_scene_scale(
+    metadata_scale: float,
+    override: Any,
+    parameter_name: str = "initial_scene_scale_overwrite",
+) -> float:
     if override is None:
         return metadata_scale
     if isinstance(override, bool) or not isinstance(override, (int, float)):
         raise ValueError(
-            "job.parameters.initial_scene_scale_overwrite must be a finite number"
+            f"job.parameters.{parameter_name} must be a finite number"
         )
     result = float(override)
     if not math.isfinite(result):
         raise ValueError(
-            "job.parameters.initial_scene_scale_overwrite must be a finite number"
+            f"job.parameters.{parameter_name} must be a finite number"
         )
     return metadata_scale if result == 0 else result
 

@@ -18,11 +18,11 @@ from PIL import Image, ImageDraw
 
 from runner_wrapper.fr_iqa_adapter import (
     METRIC_ALIASES,
+    SUPPORTED_METRICS,
     create_image_quality_evaluator,
     _evaluate,
     _load_rgb_image,
     _normalize_inputs,
-    _selected_metrics,
     _timestamp,
     _variant_key,
     _write_metrics_file,
@@ -51,6 +51,7 @@ logger = logging.getLogger("runner_wrapper.scale_calibration_adapter")
 
 SCALE_FIELDS_PREFIX = [
     "sample", "mode", "initial_scale", "scale_range_factor", "target_accuracy",
+    "view_distance_weight_half_life",
     "round", "point", "evaluation_id", "range_min", "range_max", "scale",
     "is_best", "is_edge", "objective_score", "objective_p10", "objective_p90",
     "depth_log_l1_median",
@@ -59,15 +60,42 @@ SCALE_FIELDS_SUFFIX = [
     "reference_count", "valid_reference_count", "converged", "achieved_accuracy",
 ]
 REFERENCE_FIELDS_PREFIX = [
-    "evaluation_id", "scale", "reference_sample", "camera_distance", "used",
-    "rejection_reason", "valid_depth_fraction", "depth_log_l1",
+    "evaluation_id", "scale", "reference_sample", "camera_distance",
+    "distance_weight", "used", "rejection_reason", "valid_depth_fraction",
+    "depth_log_l1",
 ]
 REFERENCE_FIELDS_SUFFIX = [
     "rgb_path", "depth_path",
-    "alpha_path", "error_map_path", "ground_truth_rgb_path",
-    "ground_truth_depth_path",
+    "alpha_path", "rgb_error_path", "depth_error_path", "depth_filter_path",
+    "ground_truth_rgb_path", "ground_truth_depth_path",
 ]
-RENDER_TYPES = ("rgb", "depth", "alpha", "error_map")
+RENDER_TYPES = (
+    "rgb", "depth", "alpha", "rgb_error", "depth_error", "depth_filter",
+)
+
+INFERNO_STOPS = np.asarray(
+    [
+        (0.000, 0, 0, 4),
+        (0.125, 31, 12, 72),
+        (0.250, 85, 15, 109),
+        (0.375, 136, 34, 106),
+        (0.500, 187, 55, 84),
+        (0.625, 227, 89, 51),
+        (0.750, 249, 140, 10),
+        (0.875, 249, 201, 50),
+        (1.000, 252, 255, 164),
+    ],
+    dtype=np.float32,
+)
+
+DEPTH_FILTER_LABELS = (
+    (0, "valid", (45, 180, 80)),
+    (1, "GT invalid", (110, 110, 110)),
+    (2, "GT too close", (30, 190, 210)),
+    (3, "GT too far", (50, 100, 220)),
+    (4, "render invalid", (210, 50, 190)),
+    (5, "low alpha", (235, 135, 35)),
+)
 
 
 def _number(
@@ -124,9 +152,15 @@ def _save_render_settings(
             "job.parameters.save_renders.scales must be one of all, best, none"
         )
 
-    raw_types = raw_settings.get("types", list(RENDER_TYPES))
+    raw_types = raw_settings.get("types", "all")
+    if isinstance(raw_types, str):
+        if raw_types.strip().lower() != "all":
+            raise ValueError(
+                "job.parameters.save_renders.types must be all or a list"
+            )
+        raw_types = list(RENDER_TYPES)
     if not isinstance(raw_types, list):
-        raise ValueError("job.parameters.save_renders.types must be a list")
+        raise ValueError("job.parameters.save_renders.types must be all or a list")
     render_types: set[str] = set()
     for raw_type in raw_types:
         render_type = str(raw_type).strip().lower()
@@ -151,6 +185,35 @@ def _save_render_settings(
             "job.parameters.save_renders.copy_ground_truth requires scales best or all"
         )
     return scales, render_types, copy_ground_truth
+
+
+def _render_types_for_mode(render_types: set[str], mode: str) -> set[str]:
+    active = set(render_types)
+    if mode not in {"image", "hybrid"}:
+        active.difference_update({"rgb", "rgb_error"})
+    if mode not in {"depth", "hybrid"}:
+        active.difference_update({"depth", "depth_error", "depth_filter"})
+    return active
+
+
+def _image_metric(parameters: dict[str, Any]) -> str:
+    metric = str(parameters.get("metric", "lpips")).strip().lower()
+    metric = METRIC_ALIASES.get(metric, metric)
+    if metric not in SUPPORTED_METRICS:
+        raise ValueError(
+            f"job.parameters.metric must be one of {', '.join(SUPPORTED_METRICS)}"
+        )
+    return metric
+
+
+def _image_metrics_for_mode(mode: str, metric: str) -> list[str]:
+    return [metric] if mode in {"image", "hybrid"} else []
+
+
+def _calibration_output_variant(mode: str, metric: str, variant: str) -> str:
+    metric_label = metric if mode != "depth" else "logl1"
+    variant_hash = variant.rsplit("-", 1)[-1]
+    return f"{_safe_name(mode)}-{_safe_name(metric_label)}-{variant_hash}"
 
 
 def _load_depth(path: Path, encoding: str) -> np.ndarray:
@@ -182,6 +245,120 @@ def _save_gray(values: np.ndarray, path: Path) -> None:
     Image.fromarray(np.clip(image * 255.0, 0, 255).astype(np.uint8), mode="L").save(path)
 
 
+def _inferno(values: np.ndarray) -> np.ndarray:
+    clipped = np.clip(values, 0.0, 1.0)
+    positions = INFERNO_STOPS[:, 0]
+    channels = [
+        np.interp(clipped, positions, INFERNO_STOPS[:, channel])
+        for channel in range(1, 4)
+    ]
+    return np.stack(channels, axis=-1).astype(np.uint8)
+
+
+def _save_error_heatmap(
+    values: np.ndarray,
+    path: Path,
+    label: str,
+    valid: np.ndarray | None = None,
+) -> None:
+    values = np.asarray(values, dtype=np.float32)
+    usable = np.isfinite(values)
+    if valid is not None:
+        usable &= valid
+    high = float(np.quantile(values[usable], 0.95)) if usable.any() else 1.0
+    high = max(high, 1e-12)
+    colors = _inferno(np.nan_to_num(values / high, nan=0.0, posinf=1.0, neginf=0.0))
+    colors[~usable] = (55, 55, 55)
+
+    height, width = values.shape
+    footer_height = 38
+    canvas = Image.new("RGB", (width, height + footer_height), "white")
+    canvas.paste(Image.fromarray(colors, mode="RGB"), (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    bar_left = min(8, max(0, width - 1))
+    bar_right = max(bar_left + 1, width - 8)
+    bar_top = height + 6
+    bar_height = 10
+    gradient = np.linspace(0.0, 1.0, max(1, bar_right - bar_left), dtype=np.float32)
+    gradient_rgb = _inferno(np.repeat(gradient[None, :], bar_height, axis=0))
+    canvas.paste(Image.fromarray(gradient_rgb, mode="RGB"), (bar_left, bar_top))
+    draw.text((bar_left, height + 19), f"{label}: 0", fill="black")
+    high_label = f"p95={high:.4g}"
+    text_width = draw.textlength(high_label)
+    draw.text((max(bar_left, bar_right - text_width), height + 19), high_label, fill="black")
+    canvas.save(path)
+
+
+def _depth_diagnostics(
+    ground_truth: np.ndarray,
+    predicted: np.ndarray,
+    rendered_alpha: np.ndarray,
+    min_gt_depth: float,
+    max_gt_depth: float,
+    min_alpha: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    reason = np.ones(ground_truth.shape, dtype=np.uint8)
+    finite_positive_gt = np.isfinite(ground_truth) & (ground_truth > 0)
+    reason[finite_positive_gt & (ground_truth < min_gt_depth)] = 2
+    reason[finite_positive_gt & (ground_truth > max_gt_depth)] = 3
+    in_depth_range = finite_positive_gt & (ground_truth >= min_gt_depth) & (
+        ground_truth <= max_gt_depth
+    )
+    valid_prediction = np.isfinite(predicted) & (predicted > 0)
+    reason[in_depth_range & ~valid_prediction] = 4
+    valid_alpha = np.isfinite(rendered_alpha) & (rendered_alpha >= min_alpha)
+    reason[in_depth_range & valid_prediction & ~valid_alpha] = 5
+    valid = in_depth_range & valid_prediction & valid_alpha
+    reason[valid] = 0
+    error = np.full(ground_truth.shape, np.nan, dtype=np.float32)
+    error[valid] = np.abs(np.log(predicted[valid] / ground_truth[valid]))
+    return valid, error, reason
+
+
+def _save_depth_filter(
+    ground_truth: np.ndarray,
+    reasons: np.ndarray,
+    path: Path,
+    min_gt_depth: float,
+    max_gt_depth: float,
+) -> None:
+    positive = np.isfinite(ground_truth) & (ground_truth > 0)
+    clipped = np.clip(ground_truth, max(min_gt_depth, 1e-12), max_gt_depth)
+    log_min = math.log(max(min_gt_depth, 1e-12))
+    log_max = math.log(max_gt_depth)
+    if math.isclose(log_min, log_max):
+        brightness = np.ones(ground_truth.shape, dtype=np.float32)
+    else:
+        normalized = (np.log(clipped) - log_min) / (log_max - log_min)
+        brightness = 0.3 + 0.7 * (1.0 - np.clip(normalized, 0.0, 1.0))
+    brightness[~positive] = 0.45
+
+    colors = np.zeros((*ground_truth.shape, 3), dtype=np.uint8)
+    for code, _, base_color in DEPTH_FILTER_LABELS:
+        selected = reasons == code
+        colors[selected] = np.clip(
+            np.asarray(base_color, dtype=np.float32) * brightness[selected, None],
+            0,
+            255,
+        ).astype(np.uint8)
+
+    height, width = ground_truth.shape
+    footer_height = 40
+    canvas = Image.new("RGB", (width, height + footer_height), "white")
+    canvas.paste(Image.fromarray(colors, mode="RGB"), (0, 0))
+    draw = ImageDraw.Draw(canvas)
+    x = 6
+    y = height + 7
+    for _, label, color in DEPTH_FILTER_LABELS:
+        draw.rectangle((x, y, x + 9, y + 9), fill=color)
+        draw.text((x + 13, y - 2), label, fill="black")
+        x += int(draw.textlength(label)) + 31
+        if x + 90 > width:
+            x = 6
+            y += 17
+    canvas.save(path)
+
+
 def _metric_value(metrics: list[dict[str, Any]], name: str) -> float | None:
     for metric in metrics:
         if metric["name"] != name:
@@ -204,6 +381,20 @@ def _image_loss(metric_name: str, value: float) -> float:
 
 def _median(values: list[float]) -> float | None:
     return float(np.median(values)) if values else None
+
+
+def _weighted_quantile(
+    weighted_values: list[tuple[float, float]], quantile: float
+) -> float | None:
+    if not weighted_values:
+        return None
+    values = np.asarray([item[0] for item in weighted_values], dtype=np.float64)
+    weights = np.asarray([item[1] for item in weighted_values], dtype=np.float64)
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    positions = (np.cumsum(weights) - 0.5 * weights) / weights.sum()
+    return float(np.interp(quantile, positions, values, left=values[0], right=values[-1]))
 
 
 def _calibration_metric(
@@ -323,6 +514,7 @@ def _run_job_logged(
     monitor: ResourceMonitor | None = None
     metrics_name = f"metrics-{variant}.json"
     metrics_path = workspace_root / metrics_name
+    output_variant: str | None = None
     inputs: dict[str, dict[str, dict[str, Any]]] = {}
     parameters: dict[str, Any] = {}
     try:
@@ -362,7 +554,7 @@ def _run_job_logged(
             parameters, "min_ground_truth_depth", 0.1, minimum=0.0
         )
         max_gt_depth = _number(
-            parameters, "max_ground_truth_depth", 5.0, minimum=0.0, strict_minimum=True
+            parameters, "max_ground_truth_depth", 50.0, minimum=0.0, strict_minimum=True
         )
         if max_gt_depth <= min_gt_depth:
             raise ValueError(
@@ -374,11 +566,14 @@ def _run_job_logged(
         min_valid_fraction = _number(
             parameters, "depth_min_valid_fraction", 0.3, minimum=0.0, maximum=1.0
         )
-        selected_metrics = _selected_metrics(parameters)
-        objective_metric = str(parameters.get("objective_metric", "lpips")).strip().lower()
-        objective_metric = METRIC_ALIASES.get(objective_metric, objective_metric)
-        if objective_metric not in selected_metrics:
-            raise ValueError("job.parameters.objective_metric must be selected in metrics")
+        distance_weight_half_life = _number(
+            parameters,
+            "view_distance_weight_half_life",
+            2.5,
+            minimum=0.0,
+            strict_minimum=True,
+        )
+        image_metric = _image_metric(parameters)
         saved_scales, render_types, copy_ground_truth = _save_render_settings(
             parameters
         )
@@ -392,6 +587,9 @@ def _run_job_logged(
             raise ValueError("job.primary_sample_metadata must be an object")
         pose_convention = str(
             sample_metadata.get("pose_convention") or "camera_to_world"
+        ).strip()
+        pose_coordinate_system = str(
+            sample_metadata.get("pose_coordinate_system") or ""
         ).strip()
         depth_metadata = sample_metadata.get("depth") or {}
         depth_encoding = (
@@ -427,6 +625,7 @@ def _run_job_logged(
                 convention=pose_convention,
                 primary_field=f"inputs.data.{primary_sample}.camera_pose",
                 target_field=f"inputs.references.{sample_id}.camera_pose",
+                coordinate_system=pose_coordinate_system,
             )
             if distance > max_distance:
                 skipped_references.append(
@@ -468,16 +667,40 @@ def _run_job_logged(
             raise ValueError(f"{mode} comparison requires at least one reference image")
         if mode in {"depth", "hybrid"} and not has_depth:
             raise ValueError(f"{mode} comparison requires at least one ground-truth depth map")
+        uses_image = mode in {"image", "hybrid"}
+        uses_depth = mode in {"depth", "hybrid"}
+        selected_metrics = _image_metrics_for_mode(mode, image_metric)
+        active_render_types = _render_types_for_mode(render_types, mode)
+        output_variant = _calibration_output_variant(mode, image_metric, variant)
+        metrics_name = f"metrics-{output_variant}.json"
+        metrics_path = workspace_root / metrics_name
+        renders_name = f"renders-{output_variant}"
+        renders_directory = workspace_root / renders_name
+        required_path = "image_path" if mode == "image" else "depth_path" if mode == "depth" else None
+        if required_path is not None:
+            filtered_views: list[dict[str, Any]] = []
+            for view in views:
+                if view[required_path]:
+                    filtered_views.append(view)
+                elif view["role"] == "references":
+                    skipped_references.append(
+                        {
+                            "sample": view["sample"],
+                            "distance": view["distance"],
+                            "reason": f"missing_{required_path.removesuffix('_path')}_for_{mode}_mode",
+                        }
+                    )
+            views = filtered_views
 
         for view in views:
             view["reference_image"] = None
             view["ground_truth_depth"] = None
             width = height = None
-            if view["image_path"]:
+            if uses_image and view["image_path"]:
                 reference_image, info = _load_rgb_image(view["image_path"])
                 view["reference_image"] = reference_image
                 width, height = int(info["width"]), int(info["height"])
-            if view["depth_path"]:
+            if uses_depth and view["depth_path"]:
                 ground_truth_depth = _load_depth(view["depth_path"], depth_encoding)
                 view["ground_truth_depth"] = ground_truth_depth
                 depth_height, depth_width = ground_truth_depth.shape
@@ -507,11 +730,12 @@ def _run_job_logged(
                 view_count=len(views),
                 skipped_reference_count=len(skipped_references),
                 max_references=max_references,
-                objective_metric=objective_metric,
+                metric=image_metric if uses_image else None,
                 metrics=selected_metrics,
                 search_points_per_round=points_per_round,
                 max_search_rounds=max_rounds,
                 target_accuracy=target_accuracy,
+                view_distance_weight_half_life=distance_weight_half_life,
             )
         )
         device = torch.device("cuda")
@@ -523,7 +747,7 @@ def _run_job_logged(
                 device,
                 workspace_root,
             )
-            if has_images
+            if uses_image
             else None
         )
         logger.info(
@@ -544,6 +768,7 @@ def _run_job_logged(
                 primary_field=f"inputs.data.{primary_sample}.camera_pose",
                 target_field=f"inputs.{view['role']}.{view['sample']}.camera_pose",
                 scene_scale=scale,
+                coordinate_system=pose_coordinate_system,
             )
             image, depth, alpha = render_panorama_outputs(
                 splats,
@@ -560,19 +785,22 @@ def _run_job_logged(
             view: dict[str, Any], rendered_depth: torch.Tensor, alpha: torch.Tensor, scale: float
         ) -> tuple[float, float | None, np.ndarray]:
             ground_truth = view["ground_truth_depth"]
-            if ground_truth is None:
+            if not uses_depth or ground_truth is None:
                 return 0.0, None, np.empty((0,), dtype=np.float32)
             predicted = rendered_depth.detach().cpu().numpy() / abs(scale)
             rendered_alpha = alpha.detach().cpu().numpy()
-            valid = (
-                np.isfinite(ground_truth) & (ground_truth >= min_gt_depth)
-                & (ground_truth <= max_gt_depth) & np.isfinite(predicted)
-                & (predicted > 0) & (rendered_alpha >= min_alpha)
+            valid, error, _ = _depth_diagnostics(
+                ground_truth,
+                predicted,
+                rendered_alpha,
+                min_gt_depth,
+                max_gt_depth,
+                min_alpha,
             )
             valid_fraction = float(valid.mean())
             if not valid.any() or valid_fraction < min_valid_fraction:
                 return valid_fraction, None, np.empty((0,), dtype=np.float32)
-            errors = np.abs(np.log(predicted[valid] / ground_truth[valid]))
+            errors = error[valid]
             return valid_fraction, float(np.median(errors)), errors
 
         depth_matches: list[float] = []
@@ -660,13 +888,18 @@ def _run_job_logged(
             saved_types: set[str],
         ) -> dict[str, Any]:
             detail_rows: list[dict[str, Any]] = []
-            image_losses: list[float] = []
-            depth_scores: list[float] = []
-            metric_scores: dict[str, list[float]] = {name: [] for name in selected_metrics}
+            image_losses: list[tuple[float, float]] = []
+            depth_scores: list[tuple[float, float]] = []
+            metric_scores: dict[str, list[tuple[float, float]]] = {
+                name: [] for name in selected_metrics
+            }
             for view in views:
+                distance_weight = 0.5 ** (
+                    float(view["distance"]) / distance_weight_half_life
+                )
                 image, rendered_depth, alpha = render_view(view, scale)
                 image_metrics: list[dict[str, Any]] = []
-                if view["reference_image"] is not None:
+                if uses_image and view["reference_image"] is not None:
                     image_metrics = _evaluate(
                         view["reference_image"], image.detach().cpu().unsqueeze(0),
                         selected_metrics, evaluator,
@@ -674,15 +907,17 @@ def _run_job_logged(
                     for name in selected_metrics:
                         value = _metric_value(image_metrics, name)
                         if value is not None:
-                            metric_scores[name].append(value)
-                valid_fraction, depth_score, depth_errors = depth_values(
+                            metric_scores[name].append((value, distance_weight))
+                valid_fraction, depth_score, _ = depth_values(
                     view, rendered_depth, alpha, scale
                 )
                 if depth_score is not None:
-                    depth_scores.append(depth_score)
-                image_objective = _metric_value(image_metrics, objective_metric)
+                    depth_scores.append((depth_score, distance_weight))
+                image_objective = _metric_value(image_metrics, image_metric)
                 if image_objective is not None:
-                    image_losses.append(_image_loss(objective_metric, image_objective))
+                    image_losses.append(
+                        (_image_loss(image_metric, image_objective), distance_weight)
+                    )
                 used = (
                     (mode == "image" and image_objective is not None)
                     or (mode == "depth" and depth_score is not None)
@@ -698,19 +933,25 @@ def _run_job_logged(
                     "scale": scale,
                     "reference_sample": view["sample"],
                     "camera_distance": view["distance"],
+                    "distance_weight": distance_weight,
                     "used": used,
                     "rejection_reason": ";".join(reasons),
-                    "valid_depth_fraction": valid_fraction if view["ground_truth_depth"] is not None else "",
+                    "valid_depth_fraction": (
+                        valid_fraction
+                        if uses_depth and view["ground_truth_depth"] is not None
+                        else ""
+                    ),
                     "depth_log_l1": depth_score if depth_score is not None else "",
                     "rgb_path": "", "depth_path": "", "alpha_path": "",
-                    "error_map_path": "", "ground_truth_rgb_path": "",
+                    "rgb_error_path": "", "depth_error_path": "",
+                    "depth_filter_path": "", "ground_truth_rgb_path": "",
                     "ground_truth_depth_path": "",
                 }
                 for name in selected_metrics:
                     value = _metric_value(image_metrics, name)
                     row[name] = value if value is not None else ""
                 if saved_types:
-                    directory = workspace_root / "renders" / evaluation_id
+                    directory = renders_directory / evaluation_id
                     directory.mkdir(parents=True, exist_ok=True)
                     sample_name = _safe_name(str(view["sample"]))
                     if "rgb" in saved_types:
@@ -726,60 +967,91 @@ def _run_job_logged(
                         alpha_path = directory / f"{sample_name}-alpha.png"
                         _save_gray(alpha.detach().cpu().numpy(), alpha_path)
                         row["alpha_path"] = alpha_path.relative_to(workspace_root).as_posix()
-                    if "error_map" in saved_types:
-                        error_path = directory / f"{sample_name}-error_map.png"
-                        if depth_errors.size:
-                            ground_truth = view["ground_truth_depth"]
-                            predicted = rendered_depth.detach().cpu().numpy() / abs(scale)
-                            error = np.zeros_like(predicted, dtype=np.float32)
-                            valid = np.isfinite(ground_truth) & (ground_truth > 0) & np.isfinite(predicted) & (predicted > 0)
-                            error[valid] = np.abs(np.log(predicted[valid] / ground_truth[valid]))
-                            high = float(np.quantile(error[valid], 0.95)) if valid.any() else 1.0
-                            _save_gray(error / max(high, 1e-12), error_path)
-                        elif view["reference_image"] is not None:
-                            reference_array = view["reference_image"][0].permute(1, 2, 0).numpy()
-                            candidate_array = image.detach().cpu().permute(1, 2, 0).numpy()
-                            _save_gray(np.abs(reference_array - candidate_array).mean(axis=-1), error_path)
-                        if error_path.is_file():
-                            row["error_map_path"] = error_path.relative_to(workspace_root).as_posix()
+                    if "rgb_error" in saved_types and view["reference_image"] is not None:
+                        reference_array = view["reference_image"][0].permute(1, 2, 0).numpy()
+                        candidate_array = image.detach().cpu().permute(1, 2, 0).numpy()
+                        rgb_error_path = directory / f"{sample_name}-rgb_error.png"
+                        _save_error_heatmap(
+                            np.abs(reference_array - candidate_array).mean(axis=-1),
+                            rgb_error_path,
+                            "RGB mean absolute error",
+                        )
+                        row["rgb_error_path"] = rgb_error_path.relative_to(workspace_root).as_posix()
+                    wants_depth_diagnostics = bool(
+                        {"depth_error", "depth_filter"} & saved_types
+                    )
+                    if wants_depth_diagnostics and view["ground_truth_depth"] is not None:
+                        ground_truth = view["ground_truth_depth"]
+                        predicted = rendered_depth.detach().cpu().numpy() / abs(scale)
+                        rendered_alpha = alpha.detach().cpu().numpy()
+                        valid, depth_error, depth_reasons = _depth_diagnostics(
+                            ground_truth,
+                            predicted,
+                            rendered_alpha,
+                            min_gt_depth,
+                            max_gt_depth,
+                            min_alpha,
+                        )
+                        if "depth_error" in saved_types:
+                            depth_error_path = directory / f"{sample_name}-depth_error.png"
+                            _save_error_heatmap(
+                                depth_error,
+                                depth_error_path,
+                                "Absolute log-depth error",
+                                valid,
+                            )
+                            row["depth_error_path"] = depth_error_path.relative_to(workspace_root).as_posix()
+                        if "depth_filter" in saved_types:
+                            depth_filter_path = directory / f"{sample_name}-depth_filter.png"
+                            _save_depth_filter(
+                                ground_truth,
+                                depth_reasons,
+                                depth_filter_path,
+                                min_gt_depth,
+                                max_gt_depth,
+                            )
+                            row["depth_filter_path"] = depth_filter_path.relative_to(workspace_root).as_posix()
                 detail_rows.append(row)
                 del image, rendered_depth, alpha
             if mode == "image":
                 if not image_losses:
                     raise ValueError(f"scale {scale:.8g} has no valid image comparisons")
                 objectives = image_losses
-                objective = float(np.median(objectives))
-                objective_p10 = float(np.quantile(objectives, 0.1))
-                objective_p90 = float(np.quantile(objectives, 0.9))
+                objective = _weighted_quantile(objectives, 0.5)
+                objective_p10 = _weighted_quantile(objectives, 0.1)
+                objective_p90 = _weighted_quantile(objectives, 0.9)
             elif mode == "depth":
                 if not depth_scores:
                     raise ValueError(f"scale {scale:.8g} has no valid depth comparisons")
                 objectives = depth_scores
-                objective = float(np.median(objectives))
-                objective_p10 = float(np.quantile(objectives, 0.1))
-                objective_p90 = float(np.quantile(objectives, 0.9))
+                objective = _weighted_quantile(objectives, 0.5)
+                objective_p10 = _weighted_quantile(objectives, 0.1)
+                objective_p90 = _weighted_quantile(objectives, 0.9)
             else:
                 if not image_losses or not depth_scores:
                     raise ValueError(f"scale {scale:.8g} requires valid image and depth comparisons")
                 objective = float(
-                    (1.0 - depth_weight) * np.median(image_losses)
-                    + depth_weight * np.median(depth_scores)
+                    (1.0 - depth_weight) * _weighted_quantile(image_losses, 0.5)
+                    + depth_weight * _weighted_quantile(depth_scores, 0.5)
                 )
                 objective_p10 = float(
-                    (1.0 - depth_weight) * np.quantile(image_losses, 0.1)
-                    + depth_weight * np.quantile(depth_scores, 0.1)
+                    (1.0 - depth_weight) * _weighted_quantile(image_losses, 0.1)
+                    + depth_weight * _weighted_quantile(depth_scores, 0.1)
                 )
                 objective_p90 = float(
-                    (1.0 - depth_weight) * np.quantile(image_losses, 0.9)
-                    + depth_weight * np.quantile(depth_scores, 0.9)
+                    (1.0 - depth_weight) * _weighted_quantile(image_losses, 0.9)
+                    + depth_weight * _weighted_quantile(depth_scores, 0.9)
                 )
             return {
                 "details": detail_rows,
                 "objective": objective,
                 "objective_p10": objective_p10,
                 "objective_p90": objective_p90,
-                "depth": _median(depth_scores),
-                "metrics": {name: _median(values) for name, values in metric_scores.items()},
+                "depth": _weighted_quantile(depth_scores, 0.5),
+                "metrics": {
+                    name: _weighted_quantile(values, 0.5)
+                    for name, values in metric_scores.items()
+                },
                 "valid_count": sum(1 for row in detail_rows if row["used"]),
             }
 
@@ -794,13 +1066,14 @@ def _run_job_logged(
                 evaluated = evaluate_scale(
                     scale,
                     evaluation_id,
-                    render_types if saved_scales == "all" else set(),
+                    active_render_types if saved_scales == "all" else set(),
                 )
                 evaluation_details[evaluation_id] = evaluated["details"]
                 reference_rows.extend(evaluated["details"])
                 row = {
                     "sample": primary_sample, "mode": mode, "initial_scale": search_center,
                     "scale_range_factor": range_factor, "target_accuracy": target_accuracy,
+                    "view_distance_weight_half_life": distance_weight_half_life,
                     "round": round_index, "point": point_index,
                     "evaluation_id": evaluation_id, "range_min": lower, "range_max": upper,
                     "scale": scale, "is_best": False, "is_edge": False,
@@ -866,36 +1139,42 @@ def _run_job_logged(
         best_scale = float(best_row["scale"])
         best_evaluation_id = str(best_row["evaluation_id"])
         if saved_scales == "best":
-            saved = evaluate_scale(best_scale, "best", render_types)["details"]
+            saved = evaluate_scale(best_scale, "best", active_render_types)["details"]
             saved_by_sample = {str(row["reference_sample"]): row for row in saved}
             for row in evaluation_details[best_evaluation_id]:
                 saved_row = saved_by_sample[str(row["reference_sample"])]
-                for field in ("rgb_path", "depth_path", "alpha_path", "error_map_path"):
+                for field in (
+                    "rgb_path", "depth_path", "alpha_path", "rgb_error_path",
+                    "depth_error_path", "depth_filter_path",
+                ):
                     if saved_row[field]:
                         row[field] = saved_row[field]
         elif saved_scales == "all":
-            original_prefix = f"renders/{best_evaluation_id}/"
-            best_prefix = "renders/best/"
-            (workspace_root / "renders" / best_evaluation_id).replace(
-                workspace_root / "renders" / "best"
-            )
-            for row in evaluation_details[best_evaluation_id]:
-                for field in ("rgb_path", "depth_path", "alpha_path", "error_map_path"):
-                    if row[field].startswith(original_prefix):
-                        row[field] = best_prefix + row[field][len(original_prefix):]
+            original_prefix = f"{renders_name}/{best_evaluation_id}/"
+            best_prefix = f"{renders_name}/best/"
+            best_source = renders_directory / best_evaluation_id
+            if best_source.is_dir():
+                best_source.replace(renders_directory / "best")
+                for row in evaluation_details[best_evaluation_id]:
+                    for field in (
+                        "rgb_path", "depth_path", "alpha_path", "rgb_error_path",
+                        "depth_error_path", "depth_filter_path",
+                    ):
+                        if row[field].startswith(original_prefix):
+                            row[field] = best_prefix + row[field][len(original_prefix):]
 
-        if copy_ground_truth:
-            best_directory = workspace_root / "renders" / "best"
+        if copy_ground_truth and active_render_types:
+            best_directory = renders_directory / "best"
             best_directory.mkdir(parents=True, exist_ok=True)
             for view in views:
                 sample_name = _safe_name(str(view["sample"]))
                 rgb_relative = depth_relative = ""
-                if "rgb" in render_types and view["image_path"]:
+                if "rgb" in active_render_types and view["image_path"]:
                     suffix = Path(view["image_path"]).suffix or ".png"
                     path = best_directory / f"{sample_name}-rgb-GT{suffix}"
                     shutil.copy2(view["image_path"], path)
                     rgb_relative = path.relative_to(workspace_root).as_posix()
-                if "depth" in render_types and view["depth_path"]:
+                if "depth" in active_render_types and view["depth_path"]:
                     suffix = Path(view["depth_path"]).suffix or ".npy"
                     path = best_directory / f"{sample_name}-depth-GT{suffix}"
                     shutil.copy2(view["depth_path"], path)
@@ -905,8 +1184,10 @@ def _run_job_logged(
                         row["ground_truth_rgb_path"] = rgb_relative
                         row["ground_truth_depth_path"] = depth_relative
 
-        scale_csv = workspace_root / "scale-evaluations.csv"
-        reference_csv = workspace_root / "scale-reference-evaluations.csv"
+        scale_csv = workspace_root / f"scale-evaluations-{output_variant}.csv"
+        reference_csv = (
+            workspace_root / f"scale-reference-evaluations-{output_variant}.csv"
+        )
         _write_csv(
             scale_csv,
             SCALE_FIELDS_PREFIX
@@ -949,17 +1230,23 @@ def _run_job_logged(
             "resource_metrics": resource_metrics,
         }
         _write_metrics_file(metrics_path, report)
-        chart_path = workspace_root / "scale-curves.png"
+        chart_path = workspace_root / f"scale-curves-{output_variant}.png"
         has_chart = _save_scale_chart(scale_rows, chart_path)
         completed_at = time.time()
+        final_log_name = f"runner-{output_variant}.log"
+        if final_log_name != log_name:
+            (workspace_root / log_name).replace(workspace_root / final_log_name)
+            log_name = final_log_name
         artifacts = [
             {"artifact_type": "job_log", "path": log_name},
             {"artifact_type": "metric_summary", "path": metrics_name},
         ]
         if has_chart:
             artifacts.append({"artifact_type": "scale_curve", "path": chart_path.name})
-        if (workspace_root / "renders").is_dir():
-            artifacts.append({"artifact_type": "rendered_outputs", "path": "renders"})
+        if renders_directory.is_dir():
+            artifacts.append(
+                {"artifact_type": "rendered_outputs", "path": renders_name}
+            )
         logger.info(
             event_message(
                 "scale_calibration_completed", job_id=job["job_id"],
@@ -993,6 +1280,11 @@ def _run_job_logged(
             metrics_path,
             {"inputs": inputs, "parameters": parameters, "status": "failed", "error": str(exc), "resource_metrics": resource_metrics},
         )
+        if output_variant is not None:
+            final_log_name = f"runner-{output_variant}.log"
+            if final_log_name != log_name:
+                (workspace_root / log_name).replace(workspace_root / final_log_name)
+                log_name = final_log_name
         return {
             "status": "failed",
             "started_at": _timestamp(started_at),

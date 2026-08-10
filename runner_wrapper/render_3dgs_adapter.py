@@ -27,7 +27,7 @@ from runner_wrapper.fr_iqa_adapter import (
 from runner_wrapper.gsplat_renderer import load_graphdeco_ply, render_panorama
 from runner_wrapper.job_logging import tee_job_output
 from runner_wrapper.measurements import ResourceMonitor
-from runner_wrapper.scale_search import scene_scale
+from runner_wrapper.scale_search import resolve_scene_scale, scene_scale
 
 logger = logging.getLogger("runner_wrapper.render_3dgs_adapter")
 
@@ -103,6 +103,7 @@ def _camera_to_world(
     *,
     field_name: str,
     convention: str,
+    coordinate_system: str | None = None,
 ) -> torch.Tensor:
     if not isinstance(camera_pose, dict):
         raise ValueError(f"{field_name} must be an object")
@@ -122,11 +123,33 @@ def _camera_to_world(
         f"{field_name}.rotation_quaternion_xyzw",
     )
     transform[:3, 3] = position
-    if convention == "camera_to_world":
-        return transform
     if convention == "world_to_camera":
-        return torch.linalg.inv(transform)
-    raise ValueError(f"unsupported pose convention: {convention}")
+        transform = torch.linalg.inv(transform)
+    elif convention != "camera_to_world":
+        raise ValueError(f"unsupported pose convention: {convention}")
+
+    basis = _renderer_coordinate_basis(coordinate_system)
+    return basis @ transform @ basis.T
+
+
+def _renderer_coordinate_basis(coordinate_system: str | None) -> torch.Tensor:
+    """Map documented pose axes to the panorama renderer's world axes."""
+    name = str(coordinate_system or "").strip().upper()
+    if not name:
+        return torch.eye(4, dtype=torch.float64)
+    axes = {
+        # Renderer world: +X panorama front, +Y up, +Z panorama right.
+        "NED": ((1, 0, 0), (0, 0, -1), (0, 1, 0)),
+        "ENU": ((0, 1, 0), (0, 0, 1), (1, 0, 0)),
+        "RDF": ((0, 0, 1), (0, -1, 0), (1, 0, 0)),
+        "RUB": ((0, 0, -1), (0, 1, 0), (1, 0, 0)),
+    }
+    rows = axes.get(name)
+    if rows is None:
+        raise ValueError(f"unsupported pose coordinate system: {coordinate_system}")
+    basis = torch.eye(4, dtype=torch.float64)
+    basis[:3, :3] = torch.tensor(rows, dtype=torch.float64)
+    return basis
 
 
 def _normalized_world_to_camera(
@@ -137,16 +160,19 @@ def _normalized_world_to_camera(
     primary_field: str,
     target_field: str,
     scene_scale: float = 1.0,
+    coordinate_system: str | None = None,
 ) -> tuple[torch.Tensor, float]:
     primary_to_world = _camera_to_world(
         primary_pose,
         field_name=primary_field,
         convention=convention,
+        coordinate_system=coordinate_system,
     )
     target_to_world = _camera_to_world(
         target_pose,
         field_name=target_field,
         convention=convention,
+        coordinate_system=coordinate_system,
     )
     target_to_primary = torch.linalg.inv(primary_to_world) @ target_to_world
     distance = float(torch.linalg.vector_norm(target_to_primary[:3, 3]))
@@ -338,13 +364,20 @@ def _run_job_logged(
         keep_images = _output_images(parameters)
         max_distance = _max_distance(parameters)
         max_references = _max_references(parameters)
-        model_scene_scale = scene_scale(job.get("primary_output_metadata"))
+        model_scene_scale = resolve_scene_scale(
+            scene_scale(job.get("primary_output_metadata")),
+            parameters.get("scene_scale_overwrite"),
+            "scene_scale_overwrite",
+        )
 
         metadata = job.get("primary_sample_metadata") or {}
         if not isinstance(metadata, dict):
             raise ValueError("job.primary_sample_metadata must be an object")
         pose_convention = str(
             metadata.get("pose_convention") or "camera_to_world"
+        ).strip()
+        pose_coordinate_system = str(
+            metadata.get("pose_coordinate_system") or ""
         ).strip()
         distance_unit = str(metadata.get("pose_units") or "unspecified").strip()
         primary_pose = primary_data.get("camera_pose") or {}
@@ -373,6 +406,7 @@ def _run_job_logged(
                 primary_field=f"inputs.data.{primary_sample}.camera_pose",
                 target_field=f"inputs.references.{sample_id}.camera_pose",
                 scene_scale=model_scene_scale,
+                coordinate_system=pose_coordinate_system,
             )
             if distance > max_distance:
                 skipped_views.append(

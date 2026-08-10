@@ -2,7 +2,7 @@ catalog_version: 1
 
 runners:
   - runner: fr_iqa
-    version: 0.1.4
+    version: 0.1.5
     latest: true
     display_name: Full-Reference Image Quality
     kind: evaluator
@@ -17,7 +17,7 @@ runners:
           required_datatype:
             - image
     job_parameters:
-      metrics: all
+      metrics: [psnr, ws_psnr, ssim, lpips, dists]
     scheduling:
       max_batch_size: 50
       max_attempts: 1
@@ -26,14 +26,14 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.4
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.5
       endpoint:
         port: 58090
       env:
         RUNNER_ADAPTER: runner_wrapper.fr_iqa_adapter:run_job
 
   - runner: 3dgs_render_iqa
-    version: 0.1.4
+    version: 0.1.5
     latest: true
     display_name: 3DGS Render Image Quality
     kind: evaluator
@@ -55,7 +55,8 @@ runners:
             - image
             - camera_pose
     job_parameters:
-      metrics: all
+      metrics: [psnr, ws_psnr, ssim, lpips, dists]
+      scene_scale_overwrite: null
       output_images: true
       max_distance: 50.0
       max_references: 500
@@ -67,7 +68,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.4
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.5
       gpus: all
       endpoint:
         port: 58090
@@ -75,7 +76,7 @@ runners:
         RUNNER_ADAPTER: runner_wrapper.render_3dgs_adapter:run_job
 
   - runner: 3dgs_scale_calibration
-    version: 0.1.4
+    version: 0.1.5
     latest: true
     display_name: 3DGS Scale Calibration
     kind: evaluator
@@ -108,14 +109,14 @@ runners:
       max_distance: 10.0
       max_references: 100
       min_ground_truth_depth: 0.1
-      max_ground_truth_depth: 5.0
+      max_ground_truth_depth: 50.0
       depth_min_render_alpha: 0.3
       depth_min_valid_fraction: 0.3
-      objective_metric: lpips
-      metrics: all
+      view_distance_weight_half_life: 2.5
+      metric: lpips
       save_renders:
         scales: none
-        types: [rgb, depth, alpha, error_map]
+        types: ["rgb", "depth", "alpha", "rgb_error", "depth_error", "depth_filter"]
         copy_ground_truth: false
     scheduling:
       max_batch_size: 10
@@ -125,7 +126,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.4
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.5
       gpus: all
       endpoint:
         port: 58090

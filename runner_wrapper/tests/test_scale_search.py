@@ -31,6 +31,10 @@ class ScaleSearchTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 resolve_scene_scale(0.7, value)
 
+    def test_scene_scale_override_uses_parameter_name_in_errors(self) -> None:
+        with self.assertRaisesRegex(ValueError, "scene_scale_overwrite"):
+            resolve_scene_scale(0.7, "invalid", "scene_scale_overwrite")
+
     def test_depth_and_hybrid_initial_scale(self) -> None:
         self.assertEqual(initial_scale(0.7, 1.2, "depth", 0.75), 1.2)
         self.assertAlmostEqual(initial_scale(0.8, 1.2, "hybrid", 0.75), 1.1)
