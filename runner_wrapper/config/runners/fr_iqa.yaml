@@ -2,7 +2,7 @@ catalog_version: 1
 
 runners:
   - runner: fr_iqa
-    version: 0.1.5
+    version: 0.1.6
     latest: true
     display_name: Full-Reference Image Quality
     kind: evaluator
@@ -26,14 +26,14 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.5
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.6
       endpoint:
         port: 58090
       env:
         RUNNER_ADAPTER: runner_wrapper.fr_iqa_adapter:run_job
 
   - runner: 3dgs_render_iqa
-    version: 0.1.5
+    version: 0.1.6
     latest: true
     display_name: 3DGS Render Image Quality
     kind: evaluator
@@ -68,7 +68,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.5
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.6
       gpus: all
       endpoint:
         port: 58090
@@ -76,7 +76,7 @@ runners:
         RUNNER_ADAPTER: runner_wrapper.render_3dgs_adapter:run_job
 
   - runner: 3dgs_scale_calibration
-    version: 0.1.5
+    version: 0.1.6
     latest: true
     display_name: 3DGS Scale Calibration
     kind: evaluator
@@ -110,8 +110,7 @@ runners:
       max_references: 100
       min_ground_truth_depth: 0.1
       max_ground_truth_depth: 50.0
-      depth_min_render_alpha: 0.3
-      depth_min_valid_fraction: 0.3
+      depth_min_render_alpha: 0.1
       view_distance_weight_half_life: 2.5
       metric: lpips
       save_renders:
@@ -126,7 +125,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.5
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.6
       gpus: all
       endpoint:
         port: 58090

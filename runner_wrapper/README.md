@@ -68,7 +68,7 @@ Manual run:
 docker run --rm -p 58090:58090 \
   -e RUNNER_NAME=fr_iqa \
   -e RUNNER_TYPE=evaluator \
-  -e RUNNER_VERSION=0.1.5 \
+  -e RUNNER_VERSION=0.1.6 \
   -v "$PWD/data:/data" \
   my-model-runner
 ```

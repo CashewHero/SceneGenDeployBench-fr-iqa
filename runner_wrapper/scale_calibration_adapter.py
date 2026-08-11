@@ -50,19 +50,17 @@ from runner_wrapper.scale_search import (
 logger = logging.getLogger("runner_wrapper.scale_calibration_adapter")
 
 SCALE_FIELDS_PREFIX = [
-    "sample", "mode", "initial_scale", "scale_range_factor", "target_accuracy",
-    "view_distance_weight_half_life",
-    "round", "point", "evaluation_id", "range_min", "range_max", "scale",
-    "is_best", "is_edge", "objective_score", "objective_p10", "objective_p90",
-    "depth_log_l1_median",
+    "evaluation_id", "round", "point", "scale",
+    "objective_score", "depth_log_l1_mean",
 ]
 SCALE_FIELDS_SUFFIX = [
-    "reference_count", "valid_reference_count", "converged", "achieved_accuracy",
+    "valid_reference_count", "is_best", "is_edge", "converged",
+    "achieved_accuracy",
 ]
 REFERENCE_FIELDS_PREFIX = [
-    "evaluation_id", "scale", "reference_sample", "camera_distance",
-    "distance_weight", "used", "rejection_reason", "valid_depth_fraction",
-    "depth_log_l1",
+    "evaluation_id", "reference_sample", "camera_distance", "distance_weight",
+    "used", "rejection_reason", "rendered_depth_fraction",
+    "depth_log_l1_mean",
 ]
 REFERENCE_FIELDS_SUFFIX = [
     "rgb_path", "depth_path",
@@ -72,6 +70,11 @@ REFERENCE_FIELDS_SUFFIX = [
 RENDER_TYPES = (
     "rgb", "depth", "alpha", "rgb_error", "depth_error", "depth_filter",
 )
+
+# Missing rendered geometry and depth errors beyond a factor of four receive the
+# same finite loss. This lets coverage affect fitting smoothly without allowing
+# empty pixels to produce infinities or hard-rejecting incomplete scenes.
+MAX_DEPTH_LOG_L1 = math.log(4.0)
 
 INFERNO_STOPS = np.asarray(
     [
@@ -315,6 +318,37 @@ def _depth_diagnostics(
     return valid, error, reason
 
 
+def _depth_loss(
+    ground_truth: np.ndarray,
+    predicted: np.ndarray,
+    rendered_alpha: np.ndarray,
+    min_gt_depth: float,
+    max_gt_depth: float,
+    min_alpha: float,
+) -> tuple[float, float | None]:
+    valid, error, _ = _depth_diagnostics(
+        ground_truth,
+        predicted,
+        rendered_alpha,
+        min_gt_depth,
+        max_gt_depth,
+        min_alpha,
+    )
+    ground_truth_valid = (
+        np.isfinite(ground_truth)
+        & (ground_truth >= min_gt_depth)
+        & (ground_truth <= max_gt_depth)
+    )
+    ground_truth_count = int(ground_truth_valid.sum())
+    if ground_truth_count == 0:
+        return 0.0, None
+
+    losses = np.full(ground_truth.shape, MAX_DEPTH_LOG_L1, dtype=np.float32)
+    losses[valid] = np.minimum(error[valid], MAX_DEPTH_LOG_L1)
+    rendered_fraction = float(valid.sum()) / ground_truth_count
+    return rendered_fraction, float(losses[ground_truth_valid].mean())
+
+
 def _save_depth_filter(
     ground_truth: np.ndarray,
     reasons: np.ndarray,
@@ -383,18 +417,14 @@ def _median(values: list[float]) -> float | None:
     return float(np.median(values)) if values else None
 
 
-def _weighted_quantile(
-    weighted_values: list[tuple[float, float]], quantile: float
+def _weighted_mean(
+    weighted_values: list[tuple[float, float]],
 ) -> float | None:
     if not weighted_values:
         return None
     values = np.asarray([item[0] for item in weighted_values], dtype=np.float64)
     weights = np.asarray([item[1] for item in weighted_values], dtype=np.float64)
-    order = np.argsort(values)
-    values = values[order]
-    weights = weights[order]
-    positions = (np.cumsum(weights) - 0.5 * weights) / weights.sum()
-    return float(np.interp(quantile, positions, values, left=values[0], right=values[-1]))
+    return float(np.average(values, weights=weights))
 
 
 def _calibration_metric(
@@ -561,10 +591,7 @@ def _run_job_logged(
                 "job.parameters.max_ground_truth_depth must exceed min_ground_truth_depth"
             )
         min_alpha = _number(
-            parameters, "depth_min_render_alpha", 0.3, minimum=0.0, maximum=1.0
-        )
-        min_valid_fraction = _number(
-            parameters, "depth_min_valid_fraction", 0.3, minimum=0.0, maximum=1.0
+            parameters, "depth_min_render_alpha", 0.1, minimum=0.0, maximum=1.0
         )
         distance_weight_half_life = _number(
             parameters,
@@ -662,7 +689,7 @@ def _run_job_logged(
         has_depth = any(view["depth_path"] for view in views)
         mode = requested_mode
         if mode == "auto":
-            mode = "hybrid" if has_images and has_depth else "depth" if has_depth else "image"
+            mode = "depth" if has_depth else "image"
         if mode in {"image", "hybrid"} and not has_images:
             raise ValueError(f"{mode} comparison requires at least one reference image")
         if mode in {"depth", "hybrid"} and not has_depth:
@@ -783,13 +810,13 @@ def _run_job_logged(
 
         def depth_values(
             view: dict[str, Any], rendered_depth: torch.Tensor, alpha: torch.Tensor, scale: float
-        ) -> tuple[float, float | None, np.ndarray]:
+        ) -> tuple[float, float | None]:
             ground_truth = view["ground_truth_depth"]
             if not uses_depth or ground_truth is None:
-                return 0.0, None, np.empty((0,), dtype=np.float32)
+                return 0.0, None
             predicted = rendered_depth.detach().cpu().numpy() / abs(scale)
             rendered_alpha = alpha.detach().cpu().numpy()
-            valid, error, _ = _depth_diagnostics(
+            return _depth_loss(
                 ground_truth,
                 predicted,
                 rendered_alpha,
@@ -797,11 +824,6 @@ def _run_job_logged(
                 max_gt_depth,
                 min_alpha,
             )
-            valid_fraction = float(valid.mean())
-            if not valid.any() or valid_fraction < min_valid_fraction:
-                return valid_fraction, None, np.empty((0,), dtype=np.float32)
-            errors = error[valid]
-            return valid_fraction, float(np.median(errors)), errors
 
         depth_matches: list[float] = []
         if mode in {"depth", "hybrid"}:
@@ -837,7 +859,7 @@ def _run_job_logged(
                     & (ground_truth <= max_gt_depth) & np.isfinite(raw_depth)
                     & (raw_depth > 0) & (rendered_alpha >= min_alpha)
                 )
-                if valid.any() and float(valid.mean()) >= min_valid_fraction:
+                if valid.any():
                     matched_magnitude = float(
                         np.median(raw_depth[valid] / ground_truth[valid])
                     )
@@ -853,7 +875,7 @@ def _run_job_logged(
                         reason=(
                             "missing_input_depth"
                             if input_depth_view is None
-                            else "insufficient_valid_input_depth"
+                            else "no_rendered_input_depth_overlap"
                         ),
                     )
                 )
@@ -908,7 +930,7 @@ def _run_job_logged(
                         value = _metric_value(image_metrics, name)
                         if value is not None:
                             metric_scores[name].append((value, distance_weight))
-                valid_fraction, depth_score, _ = depth_values(
+                rendered_depth_fraction, depth_score = depth_values(
                     view, rendered_depth, alpha, scale
                 )
                 if depth_score is not None:
@@ -927,21 +949,20 @@ def _run_job_logged(
                 if mode in {"image", "hybrid"} and image_objective is None:
                     reasons.append("missing_image_score")
                 if mode in {"depth", "hybrid"} and depth_score is None:
-                    reasons.append("insufficient_valid_depth")
+                    reasons.append("no_valid_ground_truth_depth")
                 row: dict[str, Any] = {
                     "evaluation_id": evaluation_id,
-                    "scale": scale,
                     "reference_sample": view["sample"],
                     "camera_distance": view["distance"],
                     "distance_weight": distance_weight,
                     "used": used,
                     "rejection_reason": ";".join(reasons),
-                    "valid_depth_fraction": (
-                        valid_fraction
+                    "rendered_depth_fraction": (
+                        rendered_depth_fraction
                         if uses_depth and view["ground_truth_depth"] is not None
                         else ""
                     ),
-                    "depth_log_l1": depth_score if depth_score is not None else "",
+                    "depth_log_l1_mean": depth_score if depth_score is not None else "",
                     "rgb_path": "", "depth_path": "", "alpha_path": "",
                     "rgb_error_path": "", "depth_error_path": "",
                     "depth_filter_path": "", "ground_truth_rgb_path": "",
@@ -1016,40 +1037,24 @@ def _run_job_logged(
             if mode == "image":
                 if not image_losses:
                     raise ValueError(f"scale {scale:.8g} has no valid image comparisons")
-                objectives = image_losses
-                objective = _weighted_quantile(objectives, 0.5)
-                objective_p10 = _weighted_quantile(objectives, 0.1)
-                objective_p90 = _weighted_quantile(objectives, 0.9)
+                objective = _weighted_mean(image_losses)
             elif mode == "depth":
                 if not depth_scores:
                     raise ValueError(f"scale {scale:.8g} has no valid depth comparisons")
-                objectives = depth_scores
-                objective = _weighted_quantile(objectives, 0.5)
-                objective_p10 = _weighted_quantile(objectives, 0.1)
-                objective_p90 = _weighted_quantile(objectives, 0.9)
+                objective = _weighted_mean(depth_scores)
             else:
                 if not image_losses or not depth_scores:
                     raise ValueError(f"scale {scale:.8g} requires valid image and depth comparisons")
                 objective = float(
-                    (1.0 - depth_weight) * _weighted_quantile(image_losses, 0.5)
-                    + depth_weight * _weighted_quantile(depth_scores, 0.5)
-                )
-                objective_p10 = float(
-                    (1.0 - depth_weight) * _weighted_quantile(image_losses, 0.1)
-                    + depth_weight * _weighted_quantile(depth_scores, 0.1)
-                )
-                objective_p90 = float(
-                    (1.0 - depth_weight) * _weighted_quantile(image_losses, 0.9)
-                    + depth_weight * _weighted_quantile(depth_scores, 0.9)
+                    (1.0 - depth_weight) * _weighted_mean(image_losses)
+                    + depth_weight * _weighted_mean(depth_scores)
                 )
             return {
                 "details": detail_rows,
                 "objective": objective,
-                "objective_p10": objective_p10,
-                "objective_p90": objective_p90,
-                "depth": _weighted_quantile(depth_scores, 0.5),
+                "depth": _weighted_mean(depth_scores),
                 "metrics": {
-                    name: _weighted_quantile(values, 0.5)
+                    name: _weighted_mean(values)
                     for name, values in metric_scores.items()
                 },
                 "valid_count": sum(1 for row in detail_rows if row["used"]),
@@ -1071,22 +1076,17 @@ def _run_job_logged(
                 evaluation_details[evaluation_id] = evaluated["details"]
                 reference_rows.extend(evaluated["details"])
                 row = {
-                    "sample": primary_sample, "mode": mode, "initial_scale": search_center,
-                    "scale_range_factor": range_factor, "target_accuracy": target_accuracy,
-                    "view_distance_weight_half_life": distance_weight_half_life,
                     "round": round_index, "point": point_index,
-                    "evaluation_id": evaluation_id, "range_min": lower, "range_max": upper,
+                    "evaluation_id": evaluation_id,
                     "scale": scale, "is_best": False, "is_edge": False,
                     "objective_score": evaluated["objective"],
-                    "objective_p10": evaluated["objective_p10"],
-                    "objective_p90": evaluated["objective_p90"],
-                    "depth_log_l1_median": evaluated["depth"] if evaluated["depth"] is not None else "",
-                    "reference_count": len(views), "valid_reference_count": evaluated["valid_count"],
+                    "depth_log_l1_mean": evaluated["depth"] if evaluated["depth"] is not None else "",
+                    "valid_reference_count": evaluated["valid_count"],
                     "converged": False, "achieved_accuracy": "",
                 }
                 for name in selected_metrics:
                     value = evaluated["metrics"][name]
-                    row[f"{name}_median"] = value if value is not None else ""
+                    row[f"{name}_mean"] = value if value is not None else ""
                 round_results.append(row)
                 scale_rows.append(row)
                 logger.info(
@@ -1191,7 +1191,7 @@ def _run_job_logged(
         _write_csv(
             scale_csv,
             SCALE_FIELDS_PREFIX
-            + [f"{name}_median" for name in selected_metrics]
+            + [f"{name}_mean" for name in selected_metrics]
             + SCALE_FIELDS_SUFFIX,
             scale_rows,
         )
@@ -1224,6 +1224,10 @@ def _run_job_logged(
             "best_evaluation_id": best_evaluation_id,
             "converged": converged,
             "achieved_accuracy": achieved_accuracy,
+            "reference_count": len(views),
+            "depth_missing_log_l1_penalty": (
+                MAX_DEPTH_LOG_L1 if uses_depth else None
+            ),
             "parameters": parameters,
             "skipped_references": skipped_references,
             "metrics": summary_metrics,

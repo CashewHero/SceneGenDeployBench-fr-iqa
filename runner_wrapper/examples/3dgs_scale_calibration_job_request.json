@@ -32,8 +32,7 @@
       "max_references": 10,
       "min_ground_truth_depth": 0.1,
       "max_ground_truth_depth": 50.0,
-      "depth_min_render_alpha": 0.3,
-      "depth_min_valid_fraction": 0.3,
+      "depth_min_render_alpha": 0.1,
       "view_distance_weight_half_life": 2.5,
       "metric": "lpips",
       "save_renders": {
