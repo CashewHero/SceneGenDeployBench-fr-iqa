@@ -10,7 +10,9 @@
       "pose_units": "meters",
       "projection": "equirectangular",
       "depth": {
-        "encoding": "tartanair_float32_rgba",
+        "format": "png",
+        "encoding": "float32_le_bgra",
+        "representation": "ray_distance",
         "units": "meters"
       }
     },

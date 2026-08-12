@@ -2,7 +2,7 @@ catalog_version: 1
 
 runners:
   - runner: fr_iqa
-    version: 0.1.6
+    version: 0.1.7
     latest: true
     display_name: Full-Reference Image Quality
     kind: evaluator
@@ -26,14 +26,14 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.6
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.7
       endpoint:
         port: 58090
       env:
         RUNNER_ADAPTER: runner_wrapper.fr_iqa_adapter:run_job
 
   - runner: 3dgs_render_iqa
-    version: 0.1.6
+    version: 0.1.7
     latest: true
     display_name: 3DGS Render Image Quality
     kind: evaluator
@@ -68,7 +68,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.6
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.7
       gpus: all
       endpoint:
         port: 58090
@@ -76,7 +76,7 @@ runners:
         RUNNER_ADAPTER: runner_wrapper.render_3dgs_adapter:run_job
 
   - runner: 3dgs_scale_calibration
-    version: 0.1.6
+    version: 0.1.7
     latest: true
     display_name: 3DGS Scale Calibration
     kind: evaluator
@@ -125,7 +125,7 @@ runners:
     launcher:
       driver: docker
       compat_version: 1
-      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.6
+      image: ghcr.io/cashewhero/scenegendeploybench-fr-iqa:0.1.7
       gpus: all
       endpoint:
         port: 58090

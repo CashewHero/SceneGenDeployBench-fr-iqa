@@ -225,15 +225,40 @@ def _load_depth(path: Path, encoding: str) -> np.ndarray:
     else:
         with Image.open(path) as source:
             depth = np.asarray(source)
-    if encoding == "tartanair_float32_rgba" or (
-        depth.dtype == np.uint8 and depth.ndim == 3 and depth.shape[-1] == 4
-    ):
-        depth = np.squeeze(np.ascontiguousarray(depth).view("<f4"), axis=-1)
-    elif depth.ndim == 3 and depth.shape[-1] == 1:
+
+    if encoding == "float32_le_bgra":
+        if depth.dtype != np.uint8 or depth.ndim != 3 or depth.shape[-1] != 4:
+            raise ValueError(
+                "depth encoding float32_le_bgra requires an 8-bit "
+                f"four-channel image: {path}"
+            )
+        # PIL exposes PNG channels as RGBA. The packed convention is defined in
+        # OpenCV's BGRA order, so restore that byte order before viewing as <f4.
+        depth = np.squeeze(
+            np.ascontiguousarray(depth[..., [2, 1, 0, 3]]).view("<f4"),
+            axis=-1,
+        )
+    elif encoding == "float32":
+        if depth.ndim == 3 and depth.shape[-1] == 1:
+            depth = depth[..., 0]
+        if depth.dtype != np.float32:
+            raise ValueError(f"depth encoding float32 does not match file data: {path}")
+    else:
+        raise ValueError(f"unsupported depth encoding {encoding!r}: {path}")
+
+    if depth.ndim == 3 and depth.shape[-1] == 1:
         depth = depth[..., 0]
     if depth.ndim != 2:
         raise ValueError(f"ground-truth depth must be a single-channel image: {path}")
     return np.asarray(depth, dtype=np.float32)
+
+
+def _validate_depth_representation(representation: str) -> None:
+    if representation != "ray_distance":
+        raise ValueError(
+            "3dgs scale calibration requires "
+            "job.primary_sample_metadata.depth.representation=ray_distance"
+        )
 
 
 def _safe_name(value: str) -> str:
@@ -624,6 +649,11 @@ def _run_job_logged(
             if isinstance(depth_metadata, dict)
             else ""
         )
+        depth_representation = (
+            str(depth_metadata.get("representation") or "").strip()
+            if isinstance(depth_metadata, dict)
+            else ""
+        )
         primary_pose = data.get("camera_pose") or {}
 
         views: list[dict[str, Any]] = []
@@ -696,6 +726,8 @@ def _run_job_logged(
             raise ValueError(f"{mode} comparison requires at least one ground-truth depth map")
         uses_image = mode in {"image", "hybrid"}
         uses_depth = mode in {"depth", "hybrid"}
+        if uses_depth:
+            _validate_depth_representation(depth_representation)
         selected_metrics = _image_metrics_for_mode(mode, image_metric)
         active_render_types = _render_types_for_mode(render_types, mode)
         output_variant = _calibration_output_variant(mode, image_metric, variant)

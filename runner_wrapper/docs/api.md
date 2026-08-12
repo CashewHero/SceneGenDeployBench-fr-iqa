@@ -186,7 +186,7 @@ Failure shape:
 ## Result Rules
 
 - `output_files` uses `sample_id -> data_type -> relative path` and is omitted when the runner produces no reusable files.
-- `output_metadata` describes the generated outputs as a group and is omitted when empty. `scene_scale` is a positive finite number: displacement from the primary viewpoint in dataset space is multiplied by it before rendering in the generated scene.
+- `output_metadata` describes the generated outputs as a group and is omitted when empty. `scene_scale` is a nonzero finite number: displacement from the primary viewpoint in dataset space is multiplied by it before rendering in the generated scene; a negative value reverses the displacement direction.
 - The orchestrator resolves and stores the sample/data-type mapping in `output_files`; output targets can reuse it in any input role.
 - Construct `output_files` explicitly; do not infer it by scanning the output directory.
 - Keep semantic output keys such as `image`, `3dgs`, or `mesh`; uniqueness belongs in the filename.

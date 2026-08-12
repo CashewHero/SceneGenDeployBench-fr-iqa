@@ -43,7 +43,7 @@ The bundled adapter and examples are contract fixtures, not a complete model imp
 
 Implement the canonical [Runner API](docs/api.md), including lifecycle, request roles, runtime paths, results, and failure behavior. Do not replace the shared lifecycle in `server.py`.
 
-Read [Camera Pose](docs/camera_pose.md) and [Camera Trajectory](docs/camera_trajectory.md) when those types are used.
+Read [Camera Pose](docs/camera_pose.md), [Camera Trajectory](docs/camera_trajectory.md), and [Depth Inputs](docs/depth.md) when those types are used.
 
 Device access and runner-specific paths or flags belong in container and catalog environment configuration.
 
