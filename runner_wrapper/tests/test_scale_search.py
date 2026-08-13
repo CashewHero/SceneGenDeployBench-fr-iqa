@@ -9,6 +9,8 @@ from runner_wrapper.scale_search import (
     relative_accuracy,
     resolve_scene_scale,
     scene_scale,
+    upper_trim_count,
+    upper_trimmed_weighted_mean,
 )
 
 
@@ -59,6 +61,14 @@ class ScaleSearchTests(unittest.TestCase):
         self.assertEqual(next_range(points, 0, 1.5), (points[0] * 1.5, points[1], True))
         self.assertEqual(next_range(points, 4, 1.5), (points[3], points[4] / 1.5, True))
         self.assertAlmostEqual(relative_accuracy(-1.1, -0.9, -1.0), 0.2)
+
+    def test_upper_trimmed_weighted_mean(self) -> None:
+        self.assertEqual(upper_trim_count(19), 0)
+        self.assertEqual(upper_trim_count(20), 1)
+        weighted_losses = [(1.0, 2.0), (3.0, 1.0)] + [
+            (2.0, 1.0) for _ in range(17)
+        ] + [(100.0, 100.0)]
+        self.assertAlmostEqual(upper_trimmed_weighted_mean(weighted_losses), 39.0 / 20.0)
 
 
 if __name__ == "__main__":

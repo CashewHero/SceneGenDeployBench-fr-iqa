@@ -45,6 +45,8 @@ from runner_wrapper.scale_search import (
     relative_accuracy,
     resolve_scene_scale,
     scene_scale,
+    upper_trim_count,
+    upper_trimmed_weighted_mean,
 )
 
 logger = logging.getLogger("runner_wrapper.scale_calibration_adapter")
@@ -371,7 +373,15 @@ def _depth_loss(
     losses = np.full(ground_truth.shape, MAX_DEPTH_LOG_L1, dtype=np.float32)
     losses[valid] = np.minimum(error[valid], MAX_DEPTH_LOG_L1)
     rendered_fraction = float(valid.sum()) / ground_truth_count
-    return rendered_fraction, float(losses[ground_truth_valid].mean())
+    pixel_losses = losses[ground_truth_valid]
+    trim_count = upper_trim_count(pixel_losses.size)
+    if trim_count:
+        retained_count = pixel_losses.size - trim_count
+        # Exclude the largest per-pixel log losses from this view's mean.
+        pixel_losses = np.partition(
+            pixel_losses, retained_count - 1
+        )[:retained_count]
+    return rendered_fraction, float(pixel_losses.mean())
 
 
 def _save_depth_filter(
@@ -1069,22 +1079,22 @@ def _run_job_logged(
             if mode == "image":
                 if not image_losses:
                     raise ValueError(f"scale {scale:.8g} has no valid image comparisons")
-                objective = _weighted_mean(image_losses)
+                objective = upper_trimmed_weighted_mean(image_losses)
             elif mode == "depth":
                 if not depth_scores:
                     raise ValueError(f"scale {scale:.8g} has no valid depth comparisons")
-                objective = _weighted_mean(depth_scores)
+                objective = upper_trimmed_weighted_mean(depth_scores)
             else:
                 if not image_losses or not depth_scores:
                     raise ValueError(f"scale {scale:.8g} requires valid image and depth comparisons")
                 objective = float(
-                    (1.0 - depth_weight) * _weighted_mean(image_losses)
-                    + depth_weight * _weighted_mean(depth_scores)
+                    (1.0 - depth_weight) * upper_trimmed_weighted_mean(image_losses)
+                    + depth_weight * upper_trimmed_weighted_mean(depth_scores)
                 )
             return {
                 "details": detail_rows,
                 "objective": objective,
-                "depth": _weighted_mean(depth_scores),
+                "depth": upper_trimmed_weighted_mean(depth_scores),
                 "metrics": {
                     name: _weighted_mean(values)
                     for name, values in metric_scores.items()

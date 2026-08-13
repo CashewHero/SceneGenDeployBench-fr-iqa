@@ -6,6 +6,20 @@ import math
 from typing import Any
 
 
+HIGH_LOSS_TRIM_FRACTION = 0.05
+
+
+def upper_trim_count(
+    item_count: int,
+    trim_fraction: float = HIGH_LOSS_TRIM_FRACTION,
+) -> int:
+    if item_count < 0:
+        raise ValueError("item_count must be non-negative")
+    if not 0.0 <= trim_fraction < 1.0:
+        raise ValueError("trim_fraction must be at least 0 and less than 1")
+    return math.floor(item_count * trim_fraction)
+
+
 def scene_scale(output_metadata: Any) -> float:
     if output_metadata is None:
         return 1.0
@@ -61,6 +75,23 @@ def initial_scale(
             + metadata_scale * (1.0 - hybrid_depth_weight)
         )
     return metadata_scale
+
+
+def upper_trimmed_weighted_mean(
+    weighted_losses: list[tuple[float, float]],
+    trim_fraction: float = HIGH_LOSS_TRIM_FRACTION,
+) -> float | None:
+    """Return a weighted mean after dropping the highest-loss fraction by count."""
+    if not weighted_losses:
+        return None
+    trim_count = upper_trim_count(len(weighted_losses), trim_fraction)
+    retained = sorted(weighted_losses, key=lambda item: item[0])[
+        : len(weighted_losses) - trim_count
+    ]
+    weight_sum = math.fsum(weight for _, weight in retained)
+    if weight_sum <= 0.0:
+        raise ValueError("weighted losses must have a positive total weight")
+    return math.fsum(loss * weight for loss, weight in retained) / weight_sum
 
 
 def logarithmic_points(lower: float, upper: float, count: int) -> list[float]:
