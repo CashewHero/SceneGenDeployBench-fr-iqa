@@ -8,6 +8,8 @@ Image-quality evaluators for SceneGenDeployBench. The shared image provides thre
 
 Scale calibration removes the highest-loss 5% of valid views before computing each objective mean. For each depth view it also excludes the 5% highest loss values.
 
+Both 3DGS runners read `primary_output_metadata.scene_coordinate_system` and convert the scene axes to the renderer's FUR convention, where +X is front, +Y is up, and +Z is right. Missing metadata defaults to FUR. Set `scene_coordinate_system_overwrite` to replace missing or incorrect metadata without modifying the PLY.
+
 The image evaluators compute PSNR, SSIM, LPIPS, WS-PSNR, and DISTS by default. Higher is better for PSNR, WS-PSNR, and SSIM; lower is better for LPIPS and DISTS. WS-PSNR uses equirectangular spherical-area weighting. `3dgs_render_iqa` saves images using sample-based names such as `frame_000003.png`. Set `output_images: false` to calculate metrics without saving those images. References are filtered by `max_distance`, sorted by distance, and capped by `max_references`. When multiple views are available, it also writes `metrics_by_distance.png`.
 
 The image uses CUDA 12.8 and builds CUDA extensions for architectures 7.5, 8.0, 8.6, and 8.9, with PTX included for 8.9.

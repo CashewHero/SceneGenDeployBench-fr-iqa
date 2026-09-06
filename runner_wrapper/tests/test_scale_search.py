@@ -7,7 +7,10 @@ from runner_wrapper.scale_search import (
     logarithmic_points,
     next_range,
     relative_accuracy,
+    resolve_scene_coordinate_system,
     resolve_scene_scale,
+    scene_coordinate_basis,
+    scene_coordinate_system,
     scene_scale,
     upper_trim_count,
     upper_trimmed_weighted_mean,
@@ -32,6 +35,46 @@ class ScaleSearchTests(unittest.TestCase):
         for value in (float("inf"), "1", True):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 resolve_scene_scale(0.7, value)
+
+    def test_scene_coordinate_system_defaults_normalizes_and_validates(self) -> None:
+        self.assertEqual(scene_coordinate_system(None), "")
+        self.assertEqual(scene_coordinate_system({}), "")
+        self.assertEqual(
+            scene_coordinate_system({"scene_coordinate_system": " rub "}),
+            "RUB",
+        )
+        for value in ("", "   ", "RRR", "XYZ", "FU", 1, {}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                scene_coordinate_system({"scene_coordinate_system": value})
+
+    def test_scene_coordinate_system_override(self) -> None:
+        self.assertEqual(resolve_scene_coordinate_system("", None), "FUR")
+        self.assertEqual(resolve_scene_coordinate_system("RDF", None), "RDF")
+        self.assertEqual(resolve_scene_coordinate_system("RDF", " rub "), "RUB")
+        for value in ("", "RRR", 1, True):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError,
+                "scene_coordinate_system_overwrite",
+            ):
+                resolve_scene_coordinate_system("RDF", value)
+
+    def test_scene_coordinate_basis_maps_into_fur(self) -> None:
+        self.assertEqual(
+            scene_coordinate_basis("FUR"),
+            ((1, 0, 0), (0, 1, 0), (0, 0, 1)),
+        )
+        self.assertEqual(
+            scene_coordinate_basis("RDF"),
+            ((0, 0, 1), (0, -1, 0), (1, 0, 0)),
+        )
+        self.assertEqual(
+            scene_coordinate_basis("RUB"),
+            ((0, 0, -1), (0, 1, 0), (1, 0, 0)),
+        )
+        self.assertEqual(
+            scene_coordinate_basis("BDR"),
+            ((-1, 0, 0), (0, -1, 0), (0, 0, 1)),
+        )
 
     def test_scene_scale_override_uses_parameter_name_in_errors(self) -> None:
         with self.assertRaisesRegex(ValueError, "scene_scale_overwrite"):

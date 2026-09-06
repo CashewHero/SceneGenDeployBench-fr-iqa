@@ -27,7 +27,13 @@ from runner_wrapper.fr_iqa_adapter import (
 from runner_wrapper.gsplat_renderer import load_graphdeco_ply, render_panorama
 from runner_wrapper.job_logging import tee_job_output
 from runner_wrapper.measurements import ResourceMonitor
-from runner_wrapper.scale_search import resolve_scene_scale, scene_scale
+from runner_wrapper.scale_search import (
+    resolve_scene_coordinate_system,
+    resolve_scene_scale,
+    scene_coordinate_basis,
+    scene_coordinate_system,
+    scene_scale,
+)
 
 logger = logging.getLogger("runner_wrapper.render_3dgs_adapter")
 
@@ -137,18 +143,29 @@ def _renderer_coordinate_basis(coordinate_system: str | None) -> torch.Tensor:
     name = str(coordinate_system or "").strip().upper()
     if not name:
         return torch.eye(4, dtype=torch.float64)
-    axes = {
-        # Renderer world: +X panorama front, +Y up, +Z panorama right.
+    geospatial_axes = {
         "NED": ((1, 0, 0), (0, 0, -1), (0, 1, 0)),
         "ENU": ((0, 1, 0), (0, 0, 1), (1, 0, 0)),
-        "RDF": ((0, 0, 1), (0, -1, 0), (1, 0, 0)),
-        "RUB": ((0, 0, -1), (0, 1, 0), (1, 0, 0)),
     }
-    rows = axes.get(name)
+    rows = geospatial_axes.get(name)
     if rows is None:
-        raise ValueError(f"unsupported pose coordinate system: {coordinate_system}")
+        try:
+            rows = scene_coordinate_basis(name)
+        except ValueError as error:
+            raise ValueError(
+                f"unsupported pose coordinate system: {coordinate_system}"
+            ) from error
     basis = torch.eye(4, dtype=torch.float64)
     basis[:3, :3] = torch.tensor(rows, dtype=torch.float64)
+    return basis
+
+
+def _scene_to_renderer_basis(coordinate_system: str) -> torch.Tensor:
+    basis = torch.eye(4, dtype=torch.float32)
+    basis[:3, :3] = torch.tensor(
+        scene_coordinate_basis(coordinate_system),
+        dtype=torch.float32,
+    )
     return basis
 
 
@@ -364,11 +381,18 @@ def _run_job_logged(
         keep_images = _output_images(parameters)
         max_distance = _max_distance(parameters)
         max_references = _max_references(parameters)
+        primary_output_metadata = job.get("primary_output_metadata")
         model_scene_scale = resolve_scene_scale(
-            scene_scale(job.get("primary_output_metadata")),
+            scene_scale(primary_output_metadata),
             parameters.get("scene_scale_overwrite"),
             "scene_scale_overwrite",
         )
+        metadata_coordinate_system = scene_coordinate_system(primary_output_metadata)
+        model_coordinate_system = resolve_scene_coordinate_system(
+            metadata_coordinate_system,
+            parameters.get("scene_coordinate_system_overwrite"),
+        )
+        scene_to_renderer = _scene_to_renderer_basis(model_coordinate_system)
 
         metadata = job.get("primary_sample_metadata") or {}
         if not isinstance(metadata, dict):
@@ -475,6 +499,8 @@ def _run_job_logged(
                 max_distance=max_distance,
                 max_references=max_references,
                 scene_scale=model_scene_scale,
+                metadata_scene_coordinate_system=metadata_coordinate_system or "unspecified",
+                scene_coordinate_system=model_coordinate_system,
                 metrics=selected_metrics,
             )
         )
@@ -509,7 +535,7 @@ def _run_job_logged(
                 width=int(reference_info["width"]),
                 height=int(reference_info["height"]),
                 device=device,
-                world_to_camera=view["world_to_camera"],
+                world_to_camera=view["world_to_camera"] @ scene_to_renderer,
             )
             candidate = image.detach().cpu().unsqueeze(0)
             view_metrics = _annotate_metrics(
@@ -562,6 +588,9 @@ def _run_job_logged(
 
         report: dict[str, Any] = {
             "inputs": inputs,
+            "scene_scale": model_scene_scale,
+            "metadata_scene_coordinate_system": metadata_coordinate_system or None,
+            "scene_coordinate_system": model_coordinate_system,
             "views": view_results,
         }
         if skipped_views:

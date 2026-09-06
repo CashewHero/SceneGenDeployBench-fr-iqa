@@ -8,6 +8,23 @@ from typing import Any
 
 HIGH_LOSS_TRIM_FRACTION = 0.05
 
+_SCENE_DIRECTION_AXES = {
+    "F": "forward",
+    "B": "forward",
+    "U": "vertical",
+    "D": "vertical",
+    "R": "horizontal",
+    "L": "horizontal",
+}
+_SCENE_DIRECTIONS_IN_FUR = {
+    "F": (1, 0, 0),
+    "B": (-1, 0, 0),
+    "U": (0, 1, 0),
+    "D": (0, -1, 0),
+    "R": (0, 0, 1),
+    "L": (0, 0, -1),
+}
+
 
 def upper_trim_count(
     item_count: int,
@@ -36,6 +53,62 @@ def scene_scale(output_metadata: Any) -> float:
             "job.primary_output_metadata.scene_scale must be a nonzero finite number"
         )
     return result
+
+
+def scene_coordinate_system(output_metadata: Any) -> str:
+    if output_metadata is None:
+        return ""
+    if not isinstance(output_metadata, dict):
+        raise ValueError("job.primary_output_metadata must be an object")
+    value = output_metadata.get("scene_coordinate_system")
+    if value is None:
+        return ""
+    return normalize_scene_coordinate_system(
+        value,
+        "job.primary_output_metadata.scene_coordinate_system",
+    )
+
+
+def normalize_scene_coordinate_system(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"{field_name} must be a three-letter axis-direction code"
+        )
+    result = value.strip().upper()
+    axes = [_SCENE_DIRECTION_AXES.get(direction) for direction in result]
+    if len(result) != 3 or set(axes) != {"forward", "vertical", "horizontal"}:
+        raise ValueError(
+            f"{field_name} must contain one of F/B, one of U/D, and one of R/L"
+        )
+    return result
+
+
+def resolve_scene_coordinate_system(
+    metadata_coordinate_system: str,
+    override: Any,
+    parameter_name: str = "scene_coordinate_system_overwrite",
+) -> str:
+    if override is None:
+        return metadata_coordinate_system or "FUR"
+    return normalize_scene_coordinate_system(
+        override,
+        f"job.parameters.{parameter_name}",
+    )
+
+
+def scene_coordinate_basis(
+    coordinate_system: str,
+) -> tuple[tuple[int, int, int], ...]:
+    """Return the basis that maps scene coordinates into renderer FUR coordinates."""
+    normalized = normalize_scene_coordinate_system(
+        coordinate_system,
+        "scene coordinate system",
+    )
+    columns = [_SCENE_DIRECTIONS_IN_FUR[direction] for direction in normalized]
+    return tuple(
+        tuple(columns[column][row] for column in range(3))
+        for row in range(3)
+    )
 
 
 def resolve_scene_scale(

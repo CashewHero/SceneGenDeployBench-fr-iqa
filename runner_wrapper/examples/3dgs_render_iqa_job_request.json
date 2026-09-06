@@ -10,12 +10,17 @@
       "pose_coordinate_system": "NED",
       "pose_units": "meters"
     },
+    "primary_output_metadata": {
+      "scene_scale": 1.0,
+      "scene_coordinate_system": "FUR"
+    },
     "source_job_id": "smoke-generation-job-1",
     "attempt": 1,
     "timeout_seconds": 1800,
     "parameters": {
       "metrics": "all",
       "scene_scale_overwrite": null,
+      "scene_coordinate_system_overwrite": null,
       "output_images": true,
       "max_distance": 50.0,
       "max_references": 10

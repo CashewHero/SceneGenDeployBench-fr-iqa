@@ -17,7 +17,7 @@ HOST_PORT="${RUNNER_HOST_PORT:-58090}"
 DATA_DIR="${RUNNER_DATA_DIR:-${REPO_ROOT}/data}"
 RUNNER_NAME="${RUNNER_NAME:-fr_iqa}"
 RUNNER_TYPE="${RUNNER_TYPE:-evaluator}"
-RUNNER_VERSION="${RUNNER_VERSION:-0.1.8}"
+RUNNER_VERSION="${RUNNER_VERSION:-0.1.9}"
 RUNNER_ADAPTER="${RUNNER_ADAPTER:-runner_wrapper.fr_iqa_adapter:run_job}"
 REQUEST_FILE="${RUNNER_REQUEST_FILE:-${SCRIPT_DIR}/examples/${RUNNER_TYPE}_job_request.json}"
 
@@ -80,7 +80,7 @@ from pathlib import Path
 root = Path(os.environ["DATA_DIR"])
 
 def write_png(path: Path, pixel: tuple[int, int, int]) -> None:
-    width = height = 16
+    width = height = 64
     raw = b"".join(b"\x00" + bytes(pixel) * width for _ in range(height))
     def chunk(name: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + name + data + struct.pack(">I", zlib.crc32(name + data))

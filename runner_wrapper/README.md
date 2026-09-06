@@ -61,14 +61,13 @@ runner_wrapper/localtest.sh smoke
 The orchestrator supplies the selected dataset data to a runner. An evaluator can also receive generated files and additional dataset viewpoints. Each runner reports reusable outputs or metrics back to the orchestrator.
 
 The wire contract is defined in [Runner API](docs/api.md). Use the wrapper filesystem helpers to publish job files.
-
 Manual run:
 
 ```bash
 docker run --rm -p 58090:58090 \
   -e RUNNER_NAME=fr_iqa \
   -e RUNNER_TYPE=evaluator \
-  -e RUNNER_VERSION=0.1.8 \
+  -e RUNNER_VERSION=0.1.9 \
   -v "$PWD/data:/data" \
   my-model-runner
 ```

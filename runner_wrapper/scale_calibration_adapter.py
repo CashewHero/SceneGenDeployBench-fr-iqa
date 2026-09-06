@@ -37,13 +37,16 @@ from runner_wrapper.render_3dgs_adapter import (
     _normalized_world_to_camera,
     _required_file,
     _save_image,
+    _scene_to_renderer_basis,
 )
 from runner_wrapper.scale_search import (
     initial_scale,
     logarithmic_points,
     next_range,
     relative_accuracy,
+    resolve_scene_coordinate_system,
     resolve_scene_scale,
+    scene_coordinate_system,
     scene_scale,
     upper_trim_count,
     upper_trimmed_weighted_mean,
@@ -639,7 +642,14 @@ def _run_job_logged(
         saved_scales, render_types, copy_ground_truth = _save_render_settings(
             parameters
         )
-        metadata_scale = scene_scale(job.get("primary_output_metadata"))
+        primary_output_metadata = job.get("primary_output_metadata")
+        metadata_scale = scene_scale(primary_output_metadata)
+        metadata_coordinate_system = scene_coordinate_system(primary_output_metadata)
+        model_coordinate_system = resolve_scene_coordinate_system(
+            metadata_coordinate_system,
+            parameters.get("scene_coordinate_system_overwrite"),
+        )
+        scene_to_renderer = _scene_to_renderer_basis(model_coordinate_system)
         starting_scene_scale = resolve_scene_scale(
             metadata_scale,
             parameters.get("initial_scene_scale_overwrite"),
@@ -795,6 +805,8 @@ def _run_job_logged(
                 job_id=job["job_id"],
                 mode=mode,
                 metadata_scene_scale=metadata_scale,
+                metadata_scene_coordinate_system=metadata_coordinate_system or "unspecified",
+                scene_coordinate_system=model_coordinate_system,
                 starting_scene_scale=starting_scene_scale,
                 view_count=len(views),
                 skipped_reference_count=len(skipped_references),
@@ -844,7 +856,7 @@ def _run_job_logged(
                 width=int(view["width"]),
                 height=int(view["height"]),
                 device=device,
-                world_to_camera=world_to_camera,
+                world_to_camera=world_to_camera @ scene_to_renderer,
                 include_depth=True,
             )
             assert depth is not None and alpha is not None
@@ -1259,6 +1271,8 @@ def _run_job_logged(
         report = {
             "mode": mode,
             "metadata_scene_scale": metadata_scale,
+            "metadata_scene_coordinate_system": metadata_coordinate_system or None,
+            "scene_coordinate_system": model_coordinate_system,
             "starting_scene_scale": starting_scene_scale,
             "depth_matched_scale": matched_scale,
             "initial_scale": search_center,
